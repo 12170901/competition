@@ -24,6 +24,13 @@ def role_by_id(payload: dict[str, Any], unit_id: int) -> dict[str, Any]:
     raise KeyError(unit_id)
 
 
+def fresh(payload: dict[str, Any]) -> dict[str, Any]:
+    """清掉样例里的上回合失败标记,避免 collect 被 last_ok=false 跳过。"""
+    payload["lastRoundRoleActionResults"] = {}
+    payload["errors"] = []
+    return payload
+
+
 def place(
     payload: dict[str, Any],
     unit_id: int,

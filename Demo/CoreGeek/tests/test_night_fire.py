@@ -10,6 +10,7 @@ from tests.helpers import (
     WORKER_1,
     WORKER_2,
     action_of,
+    fresh,
     place,
 )
 
@@ -46,7 +47,7 @@ def _validate(response, payload):
 
 def test_adjacent_hero_fires_gatling(make_payload):
     """工人贴着加特林、射程内有机器人 → attack 挂在塔 ID 上。"""
-    payload = make_payload(roundNo=85, phaseTask="")
+    payload = fresh(make_payload(roundNo=85, phaseTask=""))
     place(payload, WORKER_1, 8, 24, backpack=[], health=220)
     place(payload, WORKER_2, 20, 10, backpack=[], health=220)
     place(payload, PIONEER, 20, 12, backpack=["Medicine"], health=200)
@@ -60,7 +61,7 @@ def test_adjacent_hero_fires_gatling(make_payload):
 
 def test_attack_key_is_weapon_not_hero(make_payload):
     """开火指令的 key 是武器 ID,英雄自己不再挂 attack。"""
-    payload = make_payload(roundNo=85, phaseTask="")
+    payload = fresh(make_payload(roundNo=85, phaseTask=""))
     place(payload, WORKER_1, 8, 24, backpack=[], health=220)
     place(payload, WORKER_2, 20, 10, backpack=[], health=220)
     place(payload, PIONEER, 20, 12, backpack=["Medicine"], health=200)
@@ -75,7 +76,7 @@ def test_attack_key_is_weapon_not_hero(make_payload):
 
 def test_rocket_cooldown_skips_attack(make_payload):
     """火箭冷却中不得 attack。"""
-    payload = make_payload(roundNo=85, phaseTask="")
+    payload = fresh(make_payload(roundNo=85, phaseTask=""))
     place(payload, WORKER_1, 8, 26, backpack=[], health=220)
     place(payload, WORKER_2, 20, 10, backpack=[], health=220)
     place(payload, PIONEER, 20, 12, backpack=["Medicine"], health=200)
@@ -90,7 +91,7 @@ def test_rocket_cooldown_skips_attack(make_payload):
 
 def test_no_robot_no_attack(make_payload):
     """黑夜贴塔但场上无机器人,不得空放 attack。"""
-    payload = make_payload(roundNo=85, phaseTask="")
+    payload = fresh(make_payload(roundNo=85, phaseTask=""))
     place(payload, WORKER_1, 8, 24, backpack=[], health=220)
     place(payload, WORKER_2, 11, 25, backpack=[], health=220)
     place(payload, PIONEER, 8, 25, backpack=["Medicine"], health=200)
@@ -102,7 +103,7 @@ def test_no_robot_no_attack(make_payload):
 
 def test_three_heroes_three_towers_all_fire(make_payload):
     """三名英雄分别贴三座塔,射程内有怪 → 三条 attack。"""
-    payload = make_payload(roundNo=85, phaseTask="")
+    payload = fresh(make_payload(roundNo=85, phaseTask=""))
     place(payload, WORKER_1, 8, 24, backpack=[], health=220)
     place(payload, WORKER_2, 11, 25, backpack=[], health=220)
     place(payload, PIONEER, 8, 25, backpack=["Medicine"], health=200)
