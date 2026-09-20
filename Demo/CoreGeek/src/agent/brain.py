@@ -3,6 +3,7 @@ from typing import Any
 from .combat import attack_positions, bomb_center
 from .debuglog import set_extra, write_round_log
 from .grid import next_step
+from .monitor import scan_idle
 from .protocol import (
     Pos,
     TOWER_TYPES,
@@ -64,6 +65,7 @@ def decide(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         execute_cmd, prompt = _day(turn, memory, commands)
     else:
         execute_cmd, prompt = _night(turn, memory, commands)
+    scan_idle(turn, commands)
     set_extra(prompt, execute_cmd)
     write_round_log(turn, commands, prompt, execute_cmd)
     return {str(key): value for key, value in commands.items()}

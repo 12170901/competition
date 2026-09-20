@@ -5,6 +5,7 @@ from typing import Any
 
 from .brain import decide
 from .debuglog import last_extra
+from .monitor import last_idle
 
 LOGGER = logging.getLogger(__name__)
 
@@ -18,11 +19,21 @@ class Handler(BaseHTTPRequestHandler):
             response = decide(payload)
             extra = last_extra()
             LOGGER.info("round %s -> %s", payload.get("roundNo"), response)
+            idle = [
+                {
+                    "unitId": entry.unit_id,
+                    "kind": entry.kind,
+                    "pos": list(entry.pos),
+                    "reason": entry.reason,
+                }
+                for entry in last_idle()
+            ]
             body = json.dumps(
                 {
                     "roleCommandMap": response,
                     "prompt": extra.get("prompt", ""),
                     "executeCmd": extra.get("executeCmd", ""),
+                    "idleUnits": idle,
                 },
                 ensure_ascii=False,
             ).encode("utf-8")

@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from .monitor import last_idle
 from .world import ERROR_TEXT, SUMMON_TEXT, World
 
 LOGGER = logging.getLogger("agent.round")
@@ -81,7 +82,10 @@ def _build_lines(
         unit.unit_id for unit in world.controllable() if unit.unit_id not in commands
     ]
     if idle:
-        lines.append(f"  未下达指令的英雄: {idle}（可能已就位操控武器、等待任务、或寻路失败）")
+        lines.append(
+            f"  未下达指令的英雄: {idle}"
+            "（可能已就位操控武器、等待任务、或寻路失败,成因见下方监视器）"
+        )
     if prompt:
         lines.append(f"  prompt: {prompt[:300]}")
     else:
@@ -90,6 +94,15 @@ def _build_lines(
         lines.append(f"  executeCmd: {execute_cmd[:300]}")
     else:
         lines.append("  executeCmd: （空，本回合未向沙盒发命令）")
+    idle_entries = last_idle()
+    if idle_entries:
+        lines.append("-" * 72)
+        lines.append("【空闲监视器】")
+        for entry in idle_entries:
+            lines.append(
+                f"  - 空闲单位 {entry.unit_id} ({entry.kind}) "
+                f"pos={list(entry.pos)}: {entry.reason}"
+            )
     if world.notes:
         lines.append("-" * 72)
         lines.append("【决策备注 / 未执行原因】")
