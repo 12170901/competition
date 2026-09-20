@@ -133,6 +133,9 @@ def _worker_day(
                         if site in towers_missing:
                             towers_missing.remove(site)
                     return gold_left, builds_left
+    if walls_missing:
+        if _build_walls(turn, role, walls_missing, claimed, commands):
+            return gold_left, builds_left
     if _try_shop(turn, role, claimed, commands, gold_left, memory):
         if role.unit_id in commands and commands[role.unit_id]["action"] == "buy":
             item = turn.shop_item(commands[role.unit_id]["name"])
@@ -141,25 +144,37 @@ def _worker_day(
         return gold_left, builds_left
     if _try_sell(turn, role, claimed, commands, walls_missing):
         return gold_left, builds_left
-    if walls_missing:
-        stones = count_item(role, WALL_MATERIAL)
-        mine = _adjacent_mine(turn, role, "stone")
-        if mine is not None and stones < STONE_KEEP:
-            commands[role.unit_id] = collect_command(mine)
-            claimed.add(mine)
-            return gold_left, builds_left
-        if stones:
-            for site in walls_missing:
-                if site not in claimed:
-                    if _build_or_walk(turn, role, site, WALL, claimed, commands):
-                        if (
-                            role.unit_id in commands
-                            and commands[role.unit_id]["action"] == "build"
-                        ):
-                            walls_missing.remove(site)
-                    return gold_left, builds_left
     _mine(turn, role, claimed, commands)
     return gold_left, builds_left
+
+
+def _build_walls(
+    turn: World,
+    role: Unit,
+    walls_missing: list[Pos],
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+) -> bool:
+    """墙未建齐时,优先负责建墙:先采/走向石头矿,有石头则建墙。"""
+    stones = count_item(role, WALL_MATERIAL)
+    mine = _adjacent_mine(turn, role, "stone")
+    if mine is not None and stones < STONE_KEEP:
+        commands[role.unit_id] = collect_command(mine)
+        claimed.add(mine)
+        return True
+    if stones:
+        for site in walls_missing:
+            if site not in claimed:
+                if _build_or_walk(turn, role, site, WALL, claimed, commands):
+                    if (
+                        role.unit_id in commands
+                        and commands[role.unit_id]["action"] == "build"
+                    ):
+                        walls_missing.remove(site)
+                return True
+    if mine is not None:
+        return _walk_adjacent(turn, role, mine, claimed, commands)
+    return False
 
 
 def _pioneer_day(
@@ -585,15 +600,27 @@ def _stand_cells(
     return cells
 
 
+def _map_center(turn: World) -> Pos:
+    return Pos(turn.width // 2, turn.height // 2)
+
+
 def _tower_sites(turn: World) -> tuple[Pos, ...]:
     station = turn.station()
     if station is None:
         return ()
     footprint = station_footprint(station.pos)
+    center = _map_center(turn)
     cells = [
         pos for pos in _cells_at_distance(station.pos, 1) if turn.land(pos)
     ]
-    cells.sort(key=lambda pos: (_footprint_distance(pos, footprint), pos.x, pos.y))
+    cells.sort(
+        key=lambda pos: (
+            distance(pos, center),
+            _footprint_distance(pos, footprint),
+            pos.x,
+            pos.y,
+        )
+    )
     return tuple(cells[:3])
 
 
@@ -606,16 +633,24 @@ def _wall_order(turn: World) -> tuple[Pos, ...]:
     ys = [pos.y for pos in footprint]
     xmin, xmax = min(xs), max(xs)
     ymin, ymax = min(ys), max(ys)
-    order = [
-        *(Pos(x, ymin - 2) for x in range(xmax + 2, xmin - 3, -1)),
-        *(Pos(xmin - 2, y) for y in range(ymin - 1, ymax + 2)),
-        *(Pos(x, ymax + 2) for x in range(xmin - 2, xmax + 3)),
-        *(Pos(xmax + 2, y) for y in range(ymax + 1, ymin - 2, -1)),
+    edges = [
+        (Pos(x, ymin - 2) for x in range(xmax + 2, xmin - 3, -1)),
+        (Pos(xmin - 2, y) for y in range(ymin - 1, ymax + 2)),
+        (Pos(x, ymax + 2) for x in range(xmin - 2, xmax + 3)),
+        (Pos(xmax + 2, y) for y in range(ymax + 1, ymin - 2, -1)),
     ]
     entrance = Pos(xmax + 2, ymin - 1)
-    return tuple(
-        pos for pos in order if pos != entrance and turn.land(pos)
+    center = _map_center(turn)
+    edge_cells = [
+        [pos for pos in edge if pos != entrance and turn.land(pos)]
+        for edge in edges
+    ]
+    edge_cells.sort(
+        key=lambda cells: min(distance(pos, center) for pos in cells)
+        if cells
+        else 10**9,
     )
+    return tuple(pos for cells in edge_cells for pos in cells)
 
 
 def _cells_at_distance(station_pos: Pos, radius: int) -> tuple[Pos, ...]:
