@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Agent tools
+.cac/
+.opencode/
+.codegraph/
+
+# Logs
+*.log
+Log/
+
+# OS
+.DS_Store
+Thumbs.db
