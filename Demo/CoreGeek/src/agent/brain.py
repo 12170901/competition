@@ -40,6 +40,7 @@ from .world import HERO_MAX_HP, World, backpack_item, count_item
 
 TOWER_LOADOUT = ("gatling", "railgun", "rocket")
 STONE_KEEP = 4
+RECALL_FROM = 56
 _NEIGHBOUR_STEPS = (
     (-1, -1), (-1, 0), (-1, 1),
     (0, -1), (0, 1),
@@ -135,6 +136,20 @@ def _worker_day(
                         if site in towers_missing:
                             towers_missing.remove(site)
                     return gold_left, builds_left
+    if _in_recall(turn):
+        if walls_missing and count_item(role, WALL_MATERIAL):
+            for site in list(walls_missing):
+                if site in claimed or distance(role.pos, site) > 1 or role.pos == site:
+                    continue
+                if _build_or_walk(turn, role, site, WALL, claimed, commands):
+                    if (
+                        role.unit_id in commands
+                        and commands[role.unit_id]["action"] == "build"
+                    ):
+                        walls_missing.remove(site)
+                    return gold_left, builds_left
+        _recall_to_tower(turn, role, claimed, commands)
+        return gold_left, builds_left
     if walls_missing:
         if _build_walls(turn, role, walls_missing, claimed, commands):
             return gold_left, builds_left
@@ -148,6 +163,51 @@ def _worker_day(
         return gold_left, builds_left
     _mine(turn, role, claimed, commands)
     return gold_left, builds_left
+
+
+def _in_recall(turn: World) -> bool:
+    return bool(turn.is_day) and turn.round_in_day >= RECALL_FROM
+
+
+def _recall_to_tower(
+    turn: World,
+    role: Unit,
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+) -> bool:
+    weapons = turn.weapons()
+    if weapons:
+        tower = min(
+            weapons,
+            key=lambda unit: (distance(role.pos, unit.pos), unit.unit_id),
+        )
+        target = tower.pos
+    else:
+        station = turn.station()
+        if station is None:
+            return False
+        target = station.pos
+    if role.pos != target and distance(role.pos, target) <= 1:
+        return False
+    return _walk_adjacent(turn, role, target, claimed, commands)
+
+
+def _nearest_mine(
+    turn: World,
+    role: Unit,
+    kind: str,
+    claimed: set[Pos],
+) -> Pos | None:
+    candidates = [
+        pos for pos, name in turn.all_mines()
+        if name == kind and pos not in claimed
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda pos: (distance(role.pos, pos), pos.x, pos.y),
+    )
 
 
 def _build_walls(
@@ -174,8 +234,13 @@ def _build_walls(
                     ):
                         walls_missing.remove(site)
                 return True
-    if mine is not None:
-        return _walk_adjacent(turn, role, mine, claimed, commands)
+    stone = _nearest_mine(turn, role, WALL_MATERIAL, claimed)
+    if stone is not None:
+        if role.pos != stone and distance(role.pos, stone) <= 1:
+            commands[role.unit_id] = collect_command(stone)
+            claimed.add(stone)
+            return True
+        return _walk_adjacent(turn, role, stone, claimed, commands)
     return False
 
 
@@ -190,6 +255,9 @@ def _pioneer_day(
         return "", _maybe_prompt(turn, memory)
     if turn.phase_task:
         return _run_task(turn, role, memory, claimed, commands)
+    if _in_recall(turn):
+        _recall_to_tower(turn, role, claimed, commands)
+        return "", _maybe_prompt(turn, memory)
     if _try_accept_task(turn, role, claimed, commands):
         return "", _maybe_prompt(turn, memory)
     if _try_treasure(turn, role, memory, claimed, commands):
