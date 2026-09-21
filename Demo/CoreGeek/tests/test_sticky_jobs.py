@@ -1,9 +1,10 @@
 """跨回合任务连续:采矿不换目标、失败重试、工种锁矿、开拓者冷却等待、夜间人塔配对粘住。"""
 
 import agent.tasks as tasks_mod
-from agent.brain import decide
+from agent.brain import _neighbours, _tower_sites, decide
 from agent.jobs import KIND_ACCEPT, KIND_MINE, KIND_MAN_TOWER
-from agent.protocol import Pos, distance
+from agent.protocol import Pos, distance, station_footprint
+from agent.world import World
 
 from tests.helpers import (
     GATLING,
@@ -192,3 +193,67 @@ def test_night_weapon_assignment_stays_on_first_tower(make_payload):
         step = move_pos(second, WORKER_1)
         assert step is not None
         assert distance(step, Pos(9, 24)) < distance(Pos(7, 24), Pos(9, 24))
+
+
+def _opening_no_buildings(payload):
+    payload["teamOur"]["goldNum"] = 75
+    payload["teamOur"]["roles"] = [
+        role for role in payload["teamOur"]["roles"]
+        if role.get("roleType") in ("station", "worker", "pioneer")
+    ]
+    place(payload, WORKER_1, 5, 23, backpack=[])
+    place(payload, WORKER_2, 10, 16, backpack=[])
+    place(payload, PIONEER, 10, 12, backpack=["Medicine"])
+    return payload
+
+
+def _block_tower_footholds(payload):
+    world = World.load(payload)
+    sites = _tower_sites(world)
+    blocked = set(station_footprint(world.station().pos))
+    blocked.update(sites)
+    blocked.update(unit.pos for unit in world.controllable())
+    wall_id = 50000
+    for site in sites:
+        for cell in _neighbours(site):
+            if cell in blocked or not world.land(cell):
+                continue
+            payload["teamOur"]["roles"].append(
+                {
+                    "id": wall_id,
+                    "pos": {"x": cell.x, "y": cell.y},
+                    "roleType": "wall",
+                    "health": 1000,
+                    "level": 1,
+                    "attackPower": 0,
+                    "attackRange": 0,
+                    "backpack": [],
+                }
+            )
+            wall_id += 1
+            blocked.add(cell)
+    return payload
+
+
+def test_opening_workers_all_get_commands(make_payload):
+    """开局 75 金、无塔无墙:两名工人都必须有指令,不得空闲站岗。"""
+    payload = _opening_no_buildings(fresh(make_payload(roundNo=1)))
+    response = decide(payload)
+    _validate(response, payload)
+    assert action_of(response, WORKER_1) in {"move", "build", "collect"}
+    assert action_of(response, WORKER_2) in {"move", "build", "collect"}
+
+
+def test_opening_builder_falls_through_when_tower_has_no_foothold(make_payload):
+    """首选塔位周围无落脚点时,不得锁死该 Job 站着不动,应改去采石/采矿。"""
+    payload = _block_tower_footholds(
+        _opening_no_buildings(fresh(make_payload(roundNo=1)))
+    )
+    response = decide(payload)
+    _validate(response, payload)
+    action = action_of(response, WORKER_1)
+    assert action is not None, "塔位走不通时工人仍应得到 move/collect/build"
+    assert action in {"move", "collect", "build"}
+    job = tasks_mod.MEMORY.jobs.get(WORKER_1)
+    if job is not None:
+        assert job.kind != "tower" or action == "build"
