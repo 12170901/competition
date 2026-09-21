@@ -4,19 +4,20 @@
 从不建墙,导致第 71 回合机器人涌来时基地无墙可守而失败。
 本文件针对两项修复做回归:
   1. brain._wall_order / brain._tower_sites 优先朝向地图中央建防御;
-     第一天只建朝向中心的约 50% 围墙,背面留作出入口;
+     第一天只按左右朝向中心砌约 50% 围墙,远离中心的半圈留作出入口;
   2. brain._worker_day 在墙未建齐时优先建墙,而非先卖矿/采矿。
 """
 
 from __future__ import annotations
 
 from agent.brain import (
+    _center_facing_east,
     _center_facing_sides,
     _map_center,
+    _on_incoming_side,
     _tower_sites,
     _wall_order,
     _wall_ring,
-    _wall_sides,
     decide,
 )
 from agent.protocol import Pos, distance
@@ -55,20 +56,22 @@ def _set_station(payload, x, y):
 
 
 def _assert_day1_center_walls(world: World) -> tuple[Pos, ...]:
-    """第一天墙位必须是朝向地图中心的约一半外圈,且由近到远。"""
+    """第一天墙位必须是按左右朝向地图中心的约一半外圈,且由近到远。"""
     center = _map_center(world)
     ring = _wall_ring(world)
     order = _wall_order(world)
     facing = _center_facing_sides(world)
     assert ring, "地图应有完整墙圈"
     assert order, "第一天应有朝向中心的可建墙位"
-    assert facing, "基地相对地图中心应能判定朝向边"
+    assert facing in (frozenset({"east"}), frozenset({"west"})), (
+        f"来敌方向只看左右: facing={facing}"
+    )
     ratio = len(order) / len(ring)
     assert 0.4 <= ratio <= 0.6, (
         f"第一天墙位应约为整圈的 50%: got {len(order)}/{len(ring)}={ratio:.2f}"
     )
-    assert all(_wall_sides(pos, world) & facing for pos in order), (
-        f"第一天墙位必须落在朝向中心的边上: facing={sorted(facing)} order={order}"
+    assert all(_on_incoming_side(pos, world) for pos in order), (
+        f"第一天墙位必须在朝向中心的左/右半圈: facing={sorted(facing)} order={order}"
     )
     ring_min = min(distance(pos, center) for pos in ring)
     assert distance(order[0], center) == ring_min, (
@@ -77,33 +80,34 @@ def _assert_day1_center_walls(world: World) -> tuple[Pos, ...]:
     )
     dists = [distance(pos, center) for pos in order]
     assert dists == sorted(dists), "朝向中心的墙位应按距中心从近到远建造"
-    back_sides = {"north", "south", "east", "west"} - set(facing)
-    back_cells = [pos for pos in ring if _wall_sides(pos, world) <= back_sides]
-    assert back_cells, "背面应留空作出入口"
+    back_cells = [pos for pos in ring if not _on_incoming_side(pos, world)]
+    assert back_cells, "远离中心的半圈应留空作出入口"
     assert not (set(order) & set(back_cells)), "第一天不得把背向中心的墙排进计划"
     return order
 
 
 def test_wall_order_faces_map_center(make_payload):
-    """朝向修复:挑战者(左上)第一天只建朝向地图中央的约一半围墙。"""
+    """朝向修复:挑战者(左上)第一天只建朝东(地图中心)的半圈围墙。"""
     payload = make_payload(roundNo=1)
     payload = _strip_roles(payload)
     world = World.load(payload)
     order = _assert_day1_center_walls(world)
-    assert _center_facing_sides(world) == frozenset({"east", "south"})
-    assert all(pos.x == 13 or pos.y == 21 for pos in order)
+    assert _center_facing_east(world) is True
+    assert _center_facing_sides(world) == frozenset({"east"})
+    assert all(pos.x >= 11 for pos in order)
 
 
 def test_wall_order_faces_map_center_for_defender(make_payload):
-    """朝向修复:防守者(右下)第一天只建朝向地图中央的约一半围墙。"""
+    """朝向修复:防守者(右下)第一天只建朝西(地图中心)的半圈围墙。"""
     payload = make_payload(roundNo=1)
     payload = _strip_roles(payload)
     payload["teamOur"]["type"] = "defender"
     _set_station(payload, 30, 10)
     world = World.load(payload)
     order = _assert_day1_center_walls(world)
-    assert _center_facing_sides(world) == frozenset({"west", "north"})
-    assert all(pos.x == 28 or pos.y == 12 for pos in order)
+    assert _center_facing_east(world) is False
+    assert _center_facing_sides(world) == frozenset({"west"})
+    assert all(pos.x <= 30 for pos in order)
 
 
 def test_day1_wall_quota_is_about_half(make_payload):
@@ -156,8 +160,8 @@ def test_worker_builds_wall_when_towers_done(make_payload):
     assert not sells, "墙未建齐时不应出现 sell(不被卖矿抢占)"
     for cmd in builds:
         target = cmd["targetPos"][0]
-        assert target["x"] == 13 or target["y"] == 21, (
-            f"第一天应建朝向中心的墙,不应建背面: {target}"
+        assert target["x"] >= 11, (
+            f"第一天应建朝东半圈,不应建西侧背面: {target}"
         )
 
 
@@ -180,8 +184,8 @@ def test_day1_worker_does_not_build_back_wall(make_payload):
         if cmd["action"] != "build" or cmd.get("name") != "wall":
             continue
         target = cmd["targetPos"][0]
-        assert target["x"] == 13 or target["y"] == 21, (
-            f"第一天不得在背面建墙: {target}"
+        assert target["x"] >= 11, (
+            f"第一天不得在西侧背面建墙: {target}"
         )
 
 
