@@ -10,7 +10,7 @@ STONE = Pos(32, 6)
 
 
 def test_missing_walls_do_not_collect_nearby_copper():
-    payload = day_mining(20)
+    payload = day_mining(35)
     response = decide(payload)
     command = response.get(str(WORKER_1))
     assert command is not None
@@ -26,7 +26,7 @@ def test_missing_walls_do_not_collect_nearby_copper():
 
 
 def test_day_mining_payload_is_daytime():
-    payload = day_mining(20)
-    assert payload["roundNo"] == 20
+    payload = day_mining(35)
+    assert payload["roundNo"] == 35
     assert payload["robot"]["roles"] == []
     assert payload["teamOur"]["type"] == "defender"

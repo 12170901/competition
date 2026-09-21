@@ -64,6 +64,7 @@ TOWER_LOADOUT = ("gatling", "railgun", "rocket")
 STONE_KEEP = 4
 RECALL_ROUNDS = 5
 RECALL_FROM = DAY_ROUNDS - RECALL_ROUNDS + 1
+WALL_FROM = 30
 EDGE_MINE_MAX = 4
 _NEIGHBOUR_STEPS = (
     (-1, -1), (-1, 0), (-1, 1),
@@ -185,9 +186,9 @@ def _worker_day(
         return gold_left, builds_left
 
     # 09:00 逻辑:两名工人都去建塔/走近塔,不按 builder/miner 拆开。
-    # 优先建前两个塔位，第三个只有在前面两个都满了之后才建
+    # 优先建前两个塔位，第三个只有在前面两个都满了之后才建。
+    # 三塔齐后先采矿换钱、能升塔就升塔; 全局第 30 回合起才砌墙。
     num_standing_towers = len(turn.weapons())
-    third_site = sites[2] if len(sites) > 2 else None
     if towers_missing and gold_left >= WEAPON_BUILD_COST and builds_left > 0:
         for index, site in enumerate(sites):
             if site not in towers_missing or site in claimed:
@@ -212,7 +213,12 @@ def _worker_day(
                         name=TOWER_LOADOUT[index], round_no=turn.round_no,
                     )
                 return gold_left, builds_left
-    if walls_missing:
+    shopped = _try_weapon_upgrade_shop(
+        turn, role, claimed, commands, gold_left, memory,
+    )
+    if shopped is not None:
+        return shopped, builds_left
+    if walls_missing and _wall_phase(turn):
         if _build_walls(turn, role, walls_missing, claimed, commands, memory):
             return gold_left, builds_left
 
@@ -239,6 +245,49 @@ def _worker_day(
 
 def _in_recall(turn: World) -> bool:
     return bool(turn.is_day) and turn.round_in_day >= RECALL_FROM
+
+
+def _wall_phase(turn: World) -> bool:
+    """开局前 29 回合只建塔/经营; 第 30 回合起才进入砌墙阶段。"""
+    return turn.round_no >= WALL_FROM
+
+
+def _is_weapon_upgrade(name: str | None) -> bool:
+    return bool(name) and name.lower().startswith("weaponupgrade")
+
+
+def _weapon_voucher_wishlist(turn: World) -> list[str]:
+    names: list[str] = []
+    if any(unit.kind in TOWER_TYPES and unit.level == 1 for unit in turn.ours):
+        names.append("WeaponUpgradeVoucher1")
+    if any(unit.kind in TOWER_TYPES and unit.level == 2 for unit in turn.ours):
+        names.append("WeaponUpgradeVoucher2")
+    return names
+
+
+def _try_weapon_upgrade_shop(
+    turn: World,
+    role: Unit,
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+    gold_left: int,
+    memory,
+) -> int | None:
+    """金币够买武器升级券时先去商店,不把钱花在墙上。成功下达指令则返回新金币。"""
+    want = _wanted_item(turn, role, gold_left, memory)
+    if not _is_weapon_upgrade(want):
+        return None
+    if not _try_shop(turn, role, claimed, commands, gold_left, memory):
+        return None
+    if role.unit_id in commands and commands[role.unit_id]["action"] == "buy":
+        item = turn.shop_item(commands[role.unit_id]["name"])
+        if item:
+            gold_left -= item.price
+    _keep_job(
+        memory, role, KIND_SHOP, target=turn.weapon_shop_pos(),
+        name=want or "", round_no=turn.round_no,
+    )
+    return gold_left
 
 
 def _should_home(turn: World, role: Unit, memory) -> bool:
@@ -380,15 +429,24 @@ def _worker_job_valid(
             return False
         if job.name and mines[job.target] != job.name:
             return False
+        want = _wanted_item(turn, role, gold_left, memory)
+        if _is_weapon_upgrade(want):
+            return False
         if (
             walls_missing
+            and _wall_phase(turn)
             and is_builder(memory, role.unit_id)
             and mines[job.target] != WALL_MATERIAL
         ):
             return False
         return True
     if job.kind == KIND_WALL:
-        return bool(walls_missing)
+        if not walls_missing or not _wall_phase(turn):
+            return False
+        want = _wanted_item(turn, role, gold_left, memory)
+        if _is_weapon_upgrade(want):
+            return False
+        return True
     if job.kind == KIND_TOWER:
         if job.target is None or job.target not in towers_missing:
             return False
@@ -402,7 +460,7 @@ def _worker_job_valid(
             return item is not None and item.price <= gold_left
         return _wanted_item(turn, role, gold_left, memory) is not None
     if job.kind == KIND_SELL:
-        keep = 1 if walls_missing else 0
+        keep = 1 if walls_missing and _wall_phase(turn) else 0
         return turn.vendor() is not None and _sellable_ore(role, turn, keep) is not None
     if job.kind == KIND_RECALL:
         return _should_home(turn, role, memory)
@@ -905,7 +963,7 @@ def _try_sell(
     vendor = turn.vendor()
     if vendor is None:
         return False
-    keep_stone = 1 if walls_missing else 0
+    keep_stone = 1 if walls_missing and _wall_phase(turn) else 0
     ore = _sellable_ore(role, turn, keep_stone)
     if ore is None:
         return False
@@ -942,26 +1000,21 @@ def _try_shop(
 
 
 def _wanted_item(turn: World, role: Unit, gold_left: int, memory) -> str | None:
-    if treasure_ready(turn, memory) or memory.treasure_items:
-        for name in missing_treasure_items(role, memory.treasure_items):
-            item = turn.shop_item(name)
-            if item and item.price <= gold_left:
-                return item.name
-    upgrade_first: list[str] = []
-    wishlist: list[str] = []
-    if any(unit.kind in TOWER_TYPES and unit.level == 1 for unit in turn.ours):
-        upgrade_first.append("WeaponUpgradeVoucher1")
-    if turn.station() and turn.station().level == 1:
-        wishlist.append("StationUpgradeVoucher1")
-    if any(unit.kind in TOWER_TYPES and unit.level == 2 for unit in turn.ours):
-        upgrade_first.append("WeaponUpgradeVoucher2")
-    for name in upgrade_first:
+    for name in _weapon_voucher_wishlist(turn):
         item = turn.shop_item(name)
         if item is None or item.price > gold_left:
             continue
         if backpack_item(role, name):
             continue
         return name
+    if treasure_ready(turn, memory) or memory.treasure_items:
+        for name in missing_treasure_items(role, memory.treasure_items):
+            item = turn.shop_item(name)
+            if item and item.price <= gold_left:
+                return item.name
+    wishlist: list[str] = []
+    if turn.station() and turn.station().level == 1:
+        wishlist.append("StationUpgradeVoucher1")
     cap = HERO_MAX_HP.get(role.kind, 0)
     if role.health < cap and backpack_item(role, "Medicine") is None:
         wishlist.append("Medicine")
@@ -1153,7 +1206,7 @@ def _execute_sell(
     walls_missing: list[Pos],
 ) -> bool:
     vendor = turn.vendor()
-    keep_stone = 1 if walls_missing else 0
+    keep_stone = 1 if walls_missing and _wall_phase(turn) else 0
     ore = _sellable_ore(role, turn, keep_stone)
     if vendor is None or ore is None:
         return False
