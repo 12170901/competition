@@ -236,14 +236,68 @@ def test_next_task_command_falls_back_with_pending_answer():
 
 
 def test_next_task_command_fallback_cmd_progression():
-    """场景:无任何解析结果时按 task_step 回退命令序列推进。"""
+    """场景:无任何解析结果时按 task_step 在 /tmp/selfEvolutionTask 下找题目文件。"""
     memory = Memory()
-    world = _world(phaseTask='"题目"')
+    world = _world(phaseTask="请阅读task_1_alpha.md，获取任务信息")
     execute0, _ = next_task_command(world, memory)
-    assert execute0.startswith("python3 -c")
+    assert "selfEvolutionTask" in execute0
+    assert "task_1_alpha.md" in execute0
+    assert "phase_task.txt" not in execute0
     execute1, _ = next_task_command(world, memory)
-    assert execute1 == "pwd; ls -la; find . -maxdepth 3 -type f | head -80"
+    assert "selfEvolutionTask" in execute1
     assert memory.task_step == 2
+
+
+def test_fallback_cats_absolute_path_from_find_output():
+    """find 打出绝对路径后,下一步必须 cat 该路径,不能再 cat 相对文件名。"""
+    memory = Memory()
+    world = _world(
+        phaseTask="请阅读task_1_alpha.md，获取任务信息",
+        lastCmdResult=(
+            "[exitCode:1]\n"
+            "/tmp/selfEvolutionTask/1-fixed-step/2-engineering-fix/task_1_alpha.md"
+        ),
+    )
+    execute, answer = next_task_command(world, memory)
+    assert answer == ""
+    assert execute == (
+        "cat /tmp/selfEvolutionTask/1-fixed-step/2-engineering-fix/task_1_alpha.md"
+    )
+    assert memory.task_file.endswith("task_1_alpha.md")
+
+
+def test_fallback_does_not_submit_ls_listing():
+    """目录列表/路径不得当作最终答案提交。"""
+    memory = Memory(task_step=3)
+    world = _world(
+        phaseTask="请阅读task_1_alpha.md",
+        lastCmdResult="[exitCode:0]\nFILE ./foo\nFILE ./bar",
+    )
+    execute, answer = next_task_command(world, memory)
+    assert answer == ""
+    assert "FILE ./bar" not in (execute or "")
+
+
+def test_rewrite_relative_cat_to_self_evolution_root():
+    """LLM 给出 cat task_1_alpha.md 时改写到 /tmp/selfEvolutionTask 下查找。"""
+    memory = Memory()
+    world = _world(
+        phaseTask="请阅读task_1_alpha.md",
+        llmResp='{"executeCmd":"cat task_1_alpha.md","taskAnswer":""}',
+    )
+    execute, answer = next_task_command(world, memory)
+    assert answer == ""
+    assert "task_1_alpha.md" in execute
+    assert "selfEvolutionTask" in execute
+
+
+def test_llm_json_still_wins_over_fallback():
+    """有 llmResp 时仍优先用 LLM 的命令,不走相对路径 dump。"""
+    world = _world(llmResp='{"executeCmd":"pwd","taskAnswer":""}')
+    memory = Memory()
+    execute, answer = next_task_command(world, memory)
+    assert execute == "pwd"
+    assert answer == ""
 
 
 # ---------- 背包操作辅助 ----------

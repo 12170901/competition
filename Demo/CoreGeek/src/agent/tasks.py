@@ -24,6 +24,9 @@ ITEM_ALIASES = {
 }
 
 LLM_PER_DAY = 3
+TASK_ROOT = "/tmp/selfEvolutionTask"
+_TASK_FILE_NAME = re.compile(r"([\w.-]+\.(?:md|txt|json|py|csv))", re.I)
+_ABS_TASK_PATH = re.compile(r"(/tmp/selfEvolutionTask/[^\s|:]+)")
 
 
 @dataclass
@@ -40,6 +43,8 @@ class Memory:
     task_step: int = 0
     last_task: str = ""
     pending_answer: str = ""
+    task_file: str = ""
+    task_dir: str = ""
     jobs: dict[int, Job] = field(default_factory=dict)
     roles: dict[int, str] = field(default_factory=dict)
 
@@ -56,6 +61,8 @@ def observe(turn: World) -> Memory:
         memory.task_step = 0
         memory.last_task = ""
         memory.pending_answer = ""
+        memory.task_file = ""
+        memory.task_dir = ""
         memory.jobs.clear()
         memory.roles.clear()
     memory.last_round = turn.round_no
@@ -76,6 +83,8 @@ def observe(turn: World) -> Memory:
         memory.last_task = turn.phase_task
         memory.task_step = 0
         memory.pending_answer = ""
+        memory.task_file = ""
+        memory.task_dir = ""
     _absorb_llm(turn, memory)
     return memory
 
@@ -106,8 +115,12 @@ def treasure_prompt(turn: World, memory: Memory) -> str:
 
 
 def task_prompt(turn: World) -> str:
+    names = ", ".join(_extract_task_files(turn.phase_task)) or "任务原文中的文件名"
     return (
         "你在沙盒中做自进化任务。沙盒无外网，可执行 shell / python，时限15秒。"
+        "任务附件在 /tmp/selfEvolutionTask 下，必须用绝对路径读取，禁止 cat 相对路径。"
+        f"先 find /tmp/selfEvolutionTask -name '{names}' ，再 cat 找到的绝对路径。"
+        "不要把目录列表、MISSING、文件路径本身当成 taskAnswer。"
         "只输出一行 JSON："
         '{"executeCmd":"下一条命令","taskAnswer":"若已得到最终答案则填写否则空字符串"}。'
         "优先根据任务原文和上次命令输出推进，不要重复失败命令。"
@@ -129,15 +142,22 @@ def parse_llm_json(text: str) -> dict:
 
 
 def next_task_command(turn: World, memory: Memory) -> tuple[str, str]:
+    _remember_task_path(memory, turn.last_cmd_result)
     parsed = parse_llm_json(turn.llm_resp)
     execute = str(parsed.get("executeCmd") or "").strip()
     answer = str(parsed.get("taskAnswer") or "").strip()
-    if answer:
+    if answer and _looks_like_answer(answer):
         memory.pending_answer = answer
+    elif answer:
+        answer = ""
+    if execute:
+        execute = _rewrite_sandbox_cmd(execute, memory, turn)
     if execute or answer:
         memory.task_step += 1
         return execute, answer
-    if memory.pending_answer and turn.last_cmd_result:
+    if memory.pending_answer and turn.last_cmd_result and _looks_like_answer(
+        memory.pending_answer
+    ):
         return "", memory.pending_answer
     command = _fallback_cmd(turn, memory)
     memory.task_step += 1
@@ -145,36 +165,143 @@ def next_task_command(turn: World, memory: Memory) -> tuple[str, str]:
 
 
 def _fallback_cmd(turn: World, memory: Memory) -> str:
-    step = memory.task_step
-    if step == 0:
-        payload = json.dumps(turn.phase_task, ensure_ascii=False)
-        return (
-            "python3 -c "
-            + json.dumps(
-                "open('/tmp/phase_task.txt','w',encoding='utf-8').write("
-                + payload
-                + "); print('saved', len(open('/tmp/phase_task.txt',encoding='utf-8').read()))"
-            )
-        )
-    if step == 1:
-        return "pwd; ls -la; find . -maxdepth 3 -type f | head -80"
-    if step == 2:
-        return (
-            "python3 - <<'PY'\n"
+    _remember_task_path(memory, turn.last_cmd_result)
+    names = _extract_task_files(turn.phase_task)
+    name = names[0] if names else "task_*.md"
+    body = _cmd_body(turn.last_cmd_result)
+    if memory.task_file and _output_ok(turn.last_cmd_result) and not _looks_like_listing(body):
+        if "spec.md" in body or "ws_" in body:
+            return _explore_workspace_cmd(memory.task_dir)
+        if memory.task_dir and memory.task_step >= 2:
+            return _explore_workspace_cmd(memory.task_dir)
+    if memory.task_file and (
+        memory.task_step == 0 or _looks_like_listing(body) or "No such file" in body
+        or "MISSING" in body
+    ):
+        return f"cat {memory.task_file}"
+    if memory.task_file:
+        return f"cat {memory.task_file}"
+    if memory.task_step == 0:
+        return _find_task_file_cmd(name)
+    if names:
+        return _find_task_file_cmd(names[0])
+    return (
+        "python3 -c "
+        + json.dumps(
             "from pathlib import Path\n"
-            "task=Path('/tmp/phase_task.txt').read_text(encoding='utf-8',errors='ignore') "
-            "if Path('/tmp/phase_task.txt').exists() else ''\n"
-            "print(task[:4000])\n"
-            "for path in Path('.').rglob('*'):\n"
-            "    if path.is_file() and path.stat().st_size<200000:\n"
-            "        print('FILE', path)\n"
-            "PY"
+            "root=Path('/tmp/selfEvolutionTask')\n"
+            "print('\\n'.join(str(p) for p in list(root.rglob('task_*'))[:40]) "
+            "if root.exists() else 'MISSING')\n"
         )
-    if turn.last_cmd_result:
-        output = _cmd_body(turn.last_cmd_result).strip()
-        if output and len(output) < 4000:
-            memory.pending_answer = output.splitlines()[-1][:500]
-    return "python3 -c \"print(open('/tmp/phase_task.txt',encoding='utf-8').read()[:2000])\""
+    )
+
+
+def _extract_task_files(text: str) -> list[str]:
+    names: list[str] = []
+    for match in _TASK_FILE_NAME.finditer(text or ""):
+        base = match.group(1).split("/")[-1]
+        if base.lower() in {"spec.md", "readme.md", "phase_task.txt"}:
+            continue
+        if base not in names:
+            names.append(base)
+    preferred = [name for name in names if name.lower().startswith("task_")]
+    return preferred or names
+
+
+def _remember_task_path(memory: Memory, raw: str | None) -> None:
+    if not raw:
+        return
+    for match in _ABS_TASK_PATH.finditer(raw):
+        path = match.group(1).rstrip("。,;|\"'")
+        if "/tmp/selfEvolutionTask/" not in path:
+            continue
+        if path.endswith((".md", ".txt", ".json", ".py", ".csv")):
+            memory.task_file = path
+            slash = path.rfind("/")
+            memory.task_dir = path[:slash] if slash > 0 else TASK_ROOT
+            return
+
+
+def _find_task_file_cmd(name: str) -> str:
+    safe = name.replace("'", "").replace('"', "")
+    script = (
+        "from pathlib import Path\n"
+        "root=Path('/tmp/selfEvolutionTask')\n"
+        f"want={safe!r}\n"
+        "hits=[]\n"
+        "if root.exists():\n"
+        "    if '*' in want:\n"
+        "        hits=[str(p) for p in root.rglob('task_*')][:40]\n"
+        "    else:\n"
+        "        hits=[str(p) for p in root.rglob(want)][:20]\n"
+        "print('\\n'.join(hits) if hits else 'MISSING')\n"
+    )
+    return "python3 -c " + json.dumps(script)
+
+
+def _explore_workspace_cmd(task_dir: str) -> str:
+    root = task_dir if task_dir.startswith(TASK_ROOT) else TASK_ROOT
+    return (
+        f"ls -la {root}; ls -la {root}/ws_* 2>/dev/null; "
+        f"find {root} -name spec.md -o -name README.md 2>/dev/null | head -20"
+    )
+
+
+def _rewrite_sandbox_cmd(command: str, memory: Memory, turn: World) -> str:
+    stripped = command.strip()
+    match = re.match(
+        r"cat\s+(['\"]?)([\w./-]+\.(?:md|txt|json|py|csv))\1\s*$",
+        stripped,
+        re.I,
+    )
+    if not match:
+        return command
+    target = match.group(2)
+    if target.startswith(TASK_ROOT):
+        return f"cat {target}"
+    base = target.split("/")[-1]
+    if memory.task_file and memory.task_file.endswith(base):
+        return f"cat {memory.task_file}"
+    return _find_task_file_cmd(base)
+
+
+def _output_ok(raw: str) -> bool:
+    if not raw:
+        return False
+    first = raw.splitlines()[0].strip()
+    return first.startswith("[exitCode:0]") or (
+        not first.startswith("[exitCode:") and "No such file" not in raw
+    )
+
+
+def _looks_like_listing(text: str) -> bool:
+    body = (text or "").strip()
+    if not body:
+        return True
+    if "FILE " in body or "No such file" in body or body.startswith("MISSING"):
+        return True
+    if body.startswith("saved "):
+        return True
+    if body.startswith(TASK_ROOT) and len(body.splitlines()) <= 8:
+        return True
+    return False
+
+
+def _looks_like_answer(text: str) -> bool:
+    body = _cmd_body(text).strip() if "\n" in (text or "") else (text or "").strip()
+    if not body or _looks_like_listing(body):
+        return False
+    if body.startswith("#") or "自进化任务" in body or "请阅读" in body:
+        return False
+    if body.startswith(TASK_ROOT) or body.startswith("/tmp/"):
+        return False
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if not lines:
+        return False
+    last = lines[-1]
+    if len(last) > 400:
+        return False
+    return True
 
 
 def _cmd_body(raw: str) -> str:

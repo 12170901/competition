@@ -75,6 +75,33 @@ def test_idle_entry_profile(make_payload):
         assert isinstance(entry.reason, str)
 
 
+def test_attack_controller_is_not_idle(make_payload):
+    """黑夜贴塔开火时,controllerId 对应英雄不得被判空闲。"""
+    payload = make_payload(roundNo=85)
+    payload["phaseTask"] = ""
+    payload["lastRoundRoleActionResults"] = {}
+    for role in payload["teamOur"]["roles"]:
+        if role["id"] == 10010:
+            role["pos"] = {"x": 8, "y": 24}
+            role["health"] = 220
+            role["backpack"] = []
+        elif role["id"] == 10012:
+            role["pos"] = {"x": 11, "y": 25}
+            role["health"] = 220
+            role["backpack"] = []
+        elif role["id"] == 10011:
+            role["pos"] = {"x": 8, "y": 25}
+            role["health"] = 200
+            role["backpack"] = ["Medicine"]
+    payload["robot"] = {"roles": [
+        {"id": 30001, "pos": {"x": 7, "y": 24}, "roleType": "smallRobot",
+         "health": 40, "abnormalState": "", "targetTeam": "challenger"},
+    ]}
+    decide(payload)
+    idle_ids = {entry.unit_id for entry in last_idle()}
+    assert 10010 not in idle_ids
+
+
 def test_debuglog_renders_idle_section(make_payload):
     """debuglog 的【空闲监视器】段应包含每个空闲角色的信息。"""
     from agent.debuglog import _build_lines
