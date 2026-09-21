@@ -149,6 +149,19 @@ def _worker_day(
         return gold_left, builds_left
     if _try_upgrade_or_fix(turn, role, commands):
         return gold_left, builds_left
+    for voucher in ("WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"):
+        if backpack_item(role, voucher):
+            for unit in turn.ours:
+                if unit.kind not in TOWER_TYPES:
+                    continue
+                if unit.level == 3:
+                    continue
+                if _adjacent_building(turn, role, unit):
+                    continue
+                step = _step_toward(turn, role, unit.pos, claimed)
+                if step is not None:
+                    commands[role.unit_id] = move_command(step)
+                    return gold_left, builds_left
     if _should_edge_mine(turn, role, memory):
         _run_edge_mine(turn, role, claimed, commands, memory)
         return gold_left, builds_left
@@ -172,9 +185,14 @@ def _worker_day(
         return gold_left, builds_left
 
     # 09:00 逻辑:两名工人都去建塔/走近塔,不按 builder/miner 拆开。
+    # 优先建前两个塔位，第三个只有在前面两个都满了之后才建
+    num_standing_towers = len(turn.weapons())
+    third_site = sites[2] if len(sites) > 2 else None
     if towers_missing and gold_left >= WEAPON_BUILD_COST and builds_left > 0:
         for index, site in enumerate(sites):
             if site not in towers_missing or site in claimed:
+                continue
+            if num_standing_towers < 2 and index >= 2:
                 continue
             if _build_or_walk(
                 turn, role, site, TOWER_LOADOUT[index], claimed, commands,
@@ -929,13 +947,21 @@ def _wanted_item(turn: World, role: Unit, gold_left: int, memory) -> str | None:
             item = turn.shop_item(name)
             if item and item.price <= gold_left:
                 return item.name
+    upgrade_first: list[str] = []
     wishlist: list[str] = []
     if any(unit.kind in TOWER_TYPES and unit.level == 1 for unit in turn.ours):
-        wishlist.append("WeaponUpgradeVoucher1")
+        upgrade_first.append("WeaponUpgradeVoucher1")
     if turn.station() and turn.station().level == 1:
         wishlist.append("StationUpgradeVoucher1")
     if any(unit.kind in TOWER_TYPES and unit.level == 2 for unit in turn.ours):
-        wishlist.append("WeaponUpgradeVoucher2")
+        upgrade_first.append("WeaponUpgradeVoucher2")
+    for name in upgrade_first:
+        item = turn.shop_item(name)
+        if item is None or item.price > gold_left:
+            continue
+        if backpack_item(role, name):
+            continue
+        return name
     cap = HERO_MAX_HP.get(role.kind, 0)
     if role.health < cap and backpack_item(role, "Medicine") is None:
         wishlist.append("Medicine")
@@ -950,7 +976,7 @@ def _wanted_item(turn: World, role: Unit, gold_left: int, memory) -> str | None:
             continue
         if name.startswith("Weapon") and gold_left < item.price + 0:
             continue
-        return item.name
+        return name
     return None
 
 
@@ -1282,15 +1308,20 @@ def _tower_sites(turn: World) -> tuple[Pos, ...]:
     cells = [
         pos for pos in _cells_at_distance(station.pos, 1) if turn.land(pos)
     ]
-    cells.sort(
-        key=lambda pos: (
-            distance(pos, center),
-            _footprint_distance(pos, footprint),
-            pos.x,
-            pos.y,
-        )
-    )
-    return tuple(cells[:3])
+    station_x = station.pos.x
+    front_half = [p for p in cells if p.x >= station_x]
+    back_half = [p for p in cells if p.x < station_x]
+    front_half.sort(key=lambda pos: (distance(pos, center), pos.x, pos.y))
+    back_half.sort(key=lambda pos: (distance(pos, center), pos.x, pos.y))
+    result = []
+    while len(result) < 3 and (front_half or back_half):
+        if len(result) < 2 and front_half:
+            result.append(front_half.pop(0))
+        elif back_half:
+            result.append(back_half.pop(0))
+        elif front_half:
+            result.append(front_half.pop(0))
+    return tuple(result)
 
 
 def _station_bounds(turn: World) -> tuple[int, int, int, int] | None:
