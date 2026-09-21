@@ -76,3 +76,18 @@ def test_day_one_opening_does_not_attack():
     _validate(response, payload)
     assert all(cmd["action"] != "attack" for cmd in response.values())
     assert response
+
+
+def test_day_one_opening_all_heroes_act_and_builder_goes_for_tower():
+    """沙箱开局三人各自有指令:建造工建塔或走近塔,不得原地 collect。"""
+    payload = new_game()
+    response = decide(payload)
+    _validate(response, payload)
+    assert str(WORKER_1) in response
+    assert str(WORKER_2) in response
+    assert str(PIONEER) in response
+    builder = response[str(WORKER_1)]
+    assert builder["action"] in {"build", "move"}
+    assert builder["action"] != "collect"
+    if builder["action"] == "build":
+        assert builder["name"] in {"gatling", "railgun", "rocket"}
