@@ -1,9 +1,9 @@
 """跨回合任务连续:采矿不换目标、失败重试、工种锁矿、开拓者冷却等待、夜间人塔配对粘住。"""
 
 import agent.tasks as tasks_mod
-from agent.brain import _neighbours, _tower_sites, decide
+from agent.brain import _tower_sites, decide
 from agent.jobs import KIND_ACCEPT, KIND_MINE, KIND_MAN_TOWER
-from agent.protocol import Pos, distance, station_footprint
+from agent.protocol import Pos, distance
 from agent.world import World
 
 from tests.helpers import (
@@ -92,17 +92,18 @@ def test_miner_keeps_copper_when_gold_unlocks_shop(make_payload):
         assert distance(step2, SHOP) >= distance(step1, SHOP)
 
 
-def test_failed_collect_retries_same_adjacent_mine(make_payload):
-    """贴着铜矿但上回合 collect 失败:重试这座矿,不得改走远处另一座。"""
+def test_failed_collect_walks_off_blocked_adjacent_mine(make_payload):
+    """09:00 采矿:贴着铜矿但上回合 collect 失败时改走下一座,不得原地站着重试。"""
     payload = fresh(make_payload(roundNo=10))
     _park_economy(payload)
     place(payload, WORKER_1, 8, 2, backpack=[])
     payload["lastRoundRoleActionResults"] = {str(WORKER_1): False}
     response = decide(payload)
     _validate(response, payload)
-    assert action_of(response, WORKER_1) == "collect"
-    target = response[str(WORKER_1)]["targetPos"][0]
-    assert (target["x"], target["y"]) == (COPPER_NEAR.x, COPPER_NEAR.y)
+    assert action_of(response, WORKER_1) == "move"
+    step = move_pos(response, WORKER_1)
+    assert step is not None
+    assert step != Pos(8, 2)
 
 
 def test_workers_lock_distinct_mine_targets(make_payload):
@@ -207,97 +208,34 @@ def _opening_no_buildings(payload):
     return payload
 
 
-def _block_tower_footholds(payload):
-    world = World.load(payload)
-    sites = _tower_sites(world)
-    blocked = set(station_footprint(world.station().pos))
-    blocked.update(sites)
-    blocked.update(unit.pos for unit in world.controllable())
-    wall_id = 50000
-    for site in sites:
-        for cell in _neighbours(site):
-            if cell in blocked or not world.land(cell):
-                continue
-            payload["teamOur"]["roles"].append(
-                {
-                    "id": wall_id,
-                    "pos": {"x": cell.x, "y": cell.y},
-                    "roleType": "wall",
-                    "health": 1000,
-                    "level": 1,
-                    "attackPower": 0,
-                    "attackRange": 0,
-                    "backpack": [],
-                }
-            )
-            wall_id += 1
-            blocked.add(cell)
-    return payload
-
-
 def test_opening_workers_all_get_commands(make_payload):
     """开局 75 金、无塔无墙:两名工人都必须有指令,不得空闲站岗。"""
     payload = _opening_no_buildings(fresh(make_payload(roundNo=1)))
-    start = Pos(5, 23)
     response = decide(payload)
     _validate(response, payload)
     assert action_of(response, WORKER_1) in {"move", "build"}
-    assert action_of(response, WORKER_2) in {"move", "build", "collect"}
-    assert action_of(response, WORKER_1) != "collect", (
-        "开局贴着石矿也不得原地 collect,应去建塔"
-    )
-    if action_of(response, WORKER_1) == "move":
-        step = move_pos(response, WORKER_1)
-        assert step is not None
-        sites = _tower_sites(World.load(payload))
-        assert min(distance(step, site) for site in sites) < min(
-            distance(start, site) for site in sites
-        )
+    assert action_of(response, WORKER_2) in {"move", "build"}
+    assert action_of(response, PIONEER) in {"move", "acceptTask"}
 
 
-def test_opening_builder_approaches_when_tower_has_no_foothold(make_payload):
-    """首选塔位周围无落脚点时,不得原地采石站岗,应走近塔位。"""
-    payload = _block_tower_footholds(
-        _opening_no_buildings(fresh(make_payload(roundNo=1)))
-    )
-    start = Pos(5, 23)
-    world = World.load(payload)
-    sites = _tower_sites(world)
-    response = decide(payload)
-    _validate(response, payload)
-    action = action_of(response, WORKER_1)
-    assert action == "move", (
-        f"塔位无落脚时建造工应走近塔,不得 {action} 原地站岗"
-    )
-    step = move_pos(response, WORKER_1)
-    assert step is not None
-    assert min(distance(step, site) for site in sites) < min(
-        distance(start, site) for site in sites
-    )
-    job = tasks_mod.MEMORY.jobs.get(WORKER_1)
-    assert job is not None
-    assert job.kind == "tower"
-
-
-def test_opening_uses_free_ring_when_preferred_sites_occupied(make_payload):
-    """3 个首选塔位被英雄占住时,改去空的内圈格建塔,不得空闲或原地采矿。"""
+def test_opening_both_workers_walk_toward_towers(make_payload):
+    """09:00 移动:开局两名工人都走近/建造塔,第二人不得被拆去远处铜矿。"""
     payload = _opening_no_buildings(fresh(make_payload(roundNo=1)))
-    preferred = _tower_sites(World.load(payload))
-    assert len(preferred) == 3
-    place(payload, WORKER_1, preferred[0].x, preferred[0].y, backpack=[])
-    place(payload, WORKER_2, preferred[1].x, preferred[1].y, backpack=[])
-    place(payload, PIONEER, preferred[2].x, preferred[2].y, backpack=[])
+    starts = {WORKER_1: Pos(5, 23), WORKER_2: Pos(10, 16)}
     sites = _tower_sites(World.load(payload))
-    assert sites
-    assert set(sites).isdisjoint(preferred), (
-        f"被占的首选塔位应让路给空格子: still={sites} preferred={preferred}"
-    )
     response = decide(payload)
     _validate(response, payload)
-    action = action_of(response, WORKER_1)
-    assert action in {"build", "move"}, f"占住首选塔位时仍应建塔,得到 {action}"
-    if action == "build":
-        raw = response[str(WORKER_1)]["targetPos"][0]
-        built = Pos(int(raw["x"]), int(raw["y"]))
-        assert built not in preferred
-        assert response[str(WORKER_1)]["name"] in {"gatling", "railgun", "rocket"}
+    for uid, start in starts.items():
+        action = action_of(response, uid)
+        assert action in {"move", "build"}, f"{uid} 开局应去建塔,得到 {action}"
+        if action == "move":
+            step = move_pos(response, uid)
+            assert step is not None
+            assert min(distance(step, site) for site in sites) < min(
+                distance(start, site) for site in sites
+            ), f"{uid} 应从 {start} 走近塔,实际走到 {step}"
+        else:
+            raw = response[str(uid)]["targetPos"][0]
+            built = Pos(int(raw["x"]), int(raw["y"]))
+            assert built in sites
+            assert response[str(uid)]["name"] in {"gatling", "railgun", "rocket"}
