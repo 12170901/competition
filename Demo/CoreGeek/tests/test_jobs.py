@@ -10,6 +10,7 @@ from agent.jobs import (
     Job,
     assign_roles,
     claimed_targets,
+    is_edge_miner,
     update_fail_streaks,
 )
 from agent.protocol import Pos
@@ -40,6 +41,23 @@ def test_assign_roles_lone_worker_is_builder(make_payload):
     assign_roles(world, memory)
     assert memory.roles[WORKER_1] == ROLE_BUILDER
     assert WORKER_2 not in memory.roles
+
+
+def test_edge_miner_only_when_three_heroes(make_payload):
+    payload = fresh(make_payload(roundNo=10))
+    world = World.load(payload)
+    memory = Memory()
+    assign_roles(world, memory)
+    assert is_edge_miner(world, memory, WORKER_2)
+    assert not is_edge_miner(world, memory, WORKER_1)
+    payload["teamOur"]["roles"] = [
+        role for role in payload["teamOur"]["roles"]
+        if role["id"] != PIONEER
+    ]
+    world = World.load(payload)
+    memory = Memory()
+    assign_roles(world, memory)
+    assert not is_edge_miner(world, memory, WORKER_2)
 
 
 def test_fail_streak_clears_job_after_limit():

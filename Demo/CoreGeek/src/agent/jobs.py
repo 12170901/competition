@@ -61,6 +61,13 @@ def is_builder(memory, unit_id: int) -> bool:
     return memory.roles.get(unit_id) != ROLE_MINER
 
 
+def is_edge_miner(turn, memory, unit_id: int) -> bool:
+    """三人齐时矿工夜间/回防窗口去地图边缘采矿,另外两人回塔。"""
+    if memory.roles.get(unit_id) != ROLE_MINER:
+        return False
+    return len(turn.controllable()) >= 3
+
+
 def update_fail_streaks(turn, memory) -> None:
     """上回合失败累加;连续失败则丢掉 Job,允许重选。"""
     for unit_id, job in list(memory.jobs.items()):
