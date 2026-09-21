@@ -1225,18 +1225,52 @@ def _step_toward(
     *,
     inside_only: bool = False,
 ) -> Pos | None:
-    for stand in _stand_cells(turn, role, target, claimed, inside_only):
-        if stand == role.pos:
-            return None
+    stands = _stand_cells(turn, role, target, claimed, inside_only)
+    if role.pos in stands:
+        return None
+    for stand in stands:
         step = next_step(turn, role, stand)
         if step is None or step in claimed:
             continue
         claimed.add(step)
         return step
+    step = _approach_target(turn, role, target, claimed)
+    if step is not None:
+        return step
     turn.note(
         f"角色 {role.unit_id} 无法走向 ({target.x},{target.y})："
         "周围落脚点被占、越界、或被建筑/中立单位/机器人挡住"
     )
+    return None
+
+
+def _approach_target(
+    turn: World,
+    role: Unit,
+    target: Pos,
+    claimed: set[Pos],
+) -> Pos | None:
+    """落脚点被占或走不通时,仍走一步缩短与目标的切比雪夫距离,避免原地站岗。"""
+    if role.pos == target:
+        return None
+    here = distance(role.pos, target)
+    blocked = turn.blocked(role)
+    best: Pos | None = None
+    best_key: tuple[int, int, int] | None = None
+    for dx, dy in _NEIGHBOUR_STEPS:
+        pos = Pos(role.pos.x + dx, role.pos.y + dy)
+        if pos in claimed or pos in blocked or not turn.land(pos):
+            continue
+        closer = distance(pos, target)
+        if closer >= here:
+            continue
+        key = (closer, pos.x, pos.y)
+        if best_key is None or key < best_key:
+            best_key = key
+            best = pos
+    if best is not None:
+        claimed.add(best)
+        return best
     return None
 
 
@@ -1274,11 +1308,13 @@ def _tower_sites(turn: World) -> tuple[Pos, ...]:
         return ()
     footprint = station_footprint(station.pos)
     center = _map_center(turn)
+    occupied = turn.occupied_for_build()
     cells = [
         pos for pos in _cells_at_distance(station.pos, 1) if turn.land(pos)
     ]
     cells.sort(
         key=lambda pos: (
+            pos in occupied,
             distance(pos, center),
             _footprint_distance(pos, footprint),
             pos.x,

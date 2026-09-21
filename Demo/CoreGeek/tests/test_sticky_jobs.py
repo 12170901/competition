@@ -238,22 +238,66 @@ def _block_tower_footholds(payload):
 def test_opening_workers_all_get_commands(make_payload):
     """开局 75 金、无塔无墙:两名工人都必须有指令,不得空闲站岗。"""
     payload = _opening_no_buildings(fresh(make_payload(roundNo=1)))
+    start = Pos(5, 23)
     response = decide(payload)
     _validate(response, payload)
-    assert action_of(response, WORKER_1) in {"move", "build", "collect"}
+    assert action_of(response, WORKER_1) in {"move", "build"}
     assert action_of(response, WORKER_2) in {"move", "build", "collect"}
+    assert action_of(response, WORKER_1) != "collect", (
+        "开局贴着石矿也不得原地 collect,应去建塔"
+    )
+    if action_of(response, WORKER_1) == "move":
+        step = move_pos(response, WORKER_1)
+        assert step is not None
+        sites = _tower_sites(World.load(payload))
+        assert min(distance(step, site) for site in sites) < min(
+            distance(start, site) for site in sites
+        )
 
 
-def test_opening_builder_falls_through_when_tower_has_no_foothold(make_payload):
-    """首选塔位周围无落脚点时,不得锁死该 Job 站着不动,应改去采石/采矿。"""
+def test_opening_builder_approaches_when_tower_has_no_foothold(make_payload):
+    """首选塔位周围无落脚点时,不得原地采石站岗,应走近塔位。"""
     payload = _block_tower_footholds(
         _opening_no_buildings(fresh(make_payload(roundNo=1)))
+    )
+    start = Pos(5, 23)
+    world = World.load(payload)
+    sites = _tower_sites(world)
+    response = decide(payload)
+    _validate(response, payload)
+    action = action_of(response, WORKER_1)
+    assert action == "move", (
+        f"塔位无落脚时建造工应走近塔,不得 {action} 原地站岗"
+    )
+    step = move_pos(response, WORKER_1)
+    assert step is not None
+    assert min(distance(step, site) for site in sites) < min(
+        distance(start, site) for site in sites
+    )
+    job = tasks_mod.MEMORY.jobs.get(WORKER_1)
+    assert job is not None
+    assert job.kind == "tower"
+
+
+def test_opening_uses_free_ring_when_preferred_sites_occupied(make_payload):
+    """3 个首选塔位被英雄占住时,改去空的内圈格建塔,不得空闲或原地采矿。"""
+    payload = _opening_no_buildings(fresh(make_payload(roundNo=1)))
+    preferred = _tower_sites(World.load(payload))
+    assert len(preferred) == 3
+    place(payload, WORKER_1, preferred[0].x, preferred[0].y, backpack=[])
+    place(payload, WORKER_2, preferred[1].x, preferred[1].y, backpack=[])
+    place(payload, PIONEER, preferred[2].x, preferred[2].y, backpack=[])
+    sites = _tower_sites(World.load(payload))
+    assert sites
+    assert set(sites).isdisjoint(preferred), (
+        f"被占的首选塔位应让路给空格子: still={sites} preferred={preferred}"
     )
     response = decide(payload)
     _validate(response, payload)
     action = action_of(response, WORKER_1)
-    assert action is not None, "塔位走不通时工人仍应得到 move/collect/build"
-    assert action in {"move", "collect", "build"}
-    job = tasks_mod.MEMORY.jobs.get(WORKER_1)
-    if job is not None:
-        assert job.kind != "tower" or action == "build"
+    assert action in {"build", "move"}, f"占住首选塔位时仍应建塔,得到 {action}"
+    if action == "build":
+        raw = response[str(WORKER_1)]["targetPos"][0]
+        built = Pos(int(raw["x"]), int(raw["y"]))
+        assert built not in preferred
+        assert response[str(WORKER_1)]["name"] in {"gatling", "railgun", "rocket"}
