@@ -2,7 +2,7 @@
 
 import agent.tasks as tasks_mod
 from agent.brain import _tower_sites, decide
-from agent.jobs import KIND_ACCEPT, KIND_MINE, KIND_MAN_TOWER
+from agent.jobs import KIND_ACCEPT, KIND_MINE, KIND_MAN_TOWER, KIND_SHOP
 from agent.protocol import Pos, distance
 from agent.world import World
 
@@ -58,8 +58,8 @@ def _robots(*cells):
     return {"roles": roles}
 
 
-def test_miner_keeps_copper_when_gold_unlocks_shop(make_payload):
-    """先因金币不够开始采铜,下一回合金够买券也不得改去商店。"""
+def test_miner_keeps_copper_when_gold_still_short(make_payload):
+    """金币一直不够买武器券时,采矿 Job 不得中途换矿。"""
     payload = fresh(make_payload(roundNo=10))
     payload["teamOur"]["goldNum"] = 20
     _park_economy(payload)
@@ -78,7 +78,7 @@ def test_miner_keeps_copper_when_gold_unlocks_shop(make_payload):
 
     place(payload, WORKER_1, step1.x, step1.y, backpack=[])
     payload["roundNo"] = 11
-    payload["teamOur"]["goldNum"] = 200
+    payload["teamOur"]["goldNum"] = 40
     second = decide(payload)
     _validate(second, payload)
     stuck = tasks_mod.MEMORY.jobs.get(WORKER_1)
@@ -90,6 +90,40 @@ def test_miner_keeps_copper_when_gold_unlocks_shop(make_payload):
     if step2 is not None:
         assert distance(step2, COPPER_NEAR) < distance(step1, COPPER_NEAR)
         assert distance(step2, SHOP) >= distance(step1, SHOP)
+
+
+def test_miner_drops_copper_to_buy_weapon_upgrade(make_payload):
+    """采铜途中金币突然够买武器券:放下矿去商店升塔。"""
+    payload = fresh(make_payload(roundNo=10))
+    payload["teamOur"]["goldNum"] = 20
+    _park_economy(payload)
+    start = Pos(16, 8)
+    place(payload, WORKER_1, start.x, start.y, backpack=[])
+    first = decide(payload)
+    _validate(first, payload)
+    assert action_of(first, WORKER_1) == "move"
+    job = tasks_mod.MEMORY.jobs.get(WORKER_1)
+    assert job is not None
+    assert job.kind == KIND_MINE
+
+    step1 = move_pos(first, WORKER_1)
+    assert step1 is not None
+    place(payload, WORKER_1, step1.x, step1.y, backpack=[])
+    payload["roundNo"] = 11
+    payload["teamOur"]["goldNum"] = 200
+    second = decide(payload)
+    _validate(second, payload)
+    shop_job = tasks_mod.MEMORY.jobs.get(WORKER_1)
+    assert shop_job is not None
+    assert shop_job.kind == KIND_SHOP
+    action = action_of(second, WORKER_1)
+    assert action in {"move", "buy"}
+    if action == "buy":
+        assert second[str(WORKER_1)].get("name") == "WeaponUpgradeVoucher1"
+    else:
+        step2 = move_pos(second, WORKER_1)
+        assert step2 is not None
+        assert distance(step2, SHOP) < distance(step1, SHOP)
 
 
 def test_failed_collect_walks_off_blocked_adjacent_mine(make_payload):
