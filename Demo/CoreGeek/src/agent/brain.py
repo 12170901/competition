@@ -694,33 +694,84 @@ def _tower_sites(turn: World) -> tuple[Pos, ...]:
     return tuple(cells[:3])
 
 
-def _wall_order(turn: World) -> tuple[Pos, ...]:
+def _station_bounds(turn: World) -> tuple[int, int, int, int] | None:
     station = turn.station()
     if station is None:
-        return ()
+        return None
     footprint = station_footprint(station.pos)
     xs = [pos.x for pos in footprint]
     ys = [pos.y for pos in footprint]
-    xmin, xmax = min(xs), max(xs)
-    ymin, ymax = min(ys), max(ys)
-    edges = [
-        (Pos(x, ymin - 2) for x in range(xmax + 2, xmin - 3, -1)),
-        (Pos(xmin - 2, y) for y in range(ymin - 1, ymax + 2)),
-        (Pos(x, ymax + 2) for x in range(xmin - 2, xmax + 3)),
-        (Pos(xmax + 2, y) for y in range(ymax + 1, ymin - 2, -1)),
-    ]
-    entrance = Pos(xmax + 2, ymin - 1)
-    center = _map_center(turn)
-    edge_cells = [
-        [pos for pos in edge if pos != entrance and turn.land(pos)]
-        for edge in edges
-    ]
-    edge_cells.sort(
-        key=lambda cells: min(distance(pos, center) for pos in cells)
-        if cells
-        else 10**9,
+    return min(xs), max(xs), min(ys), max(ys)
+
+
+def _wall_ring(turn: World) -> tuple[Pos, ...]:
+    """基地占地切比雪夫距离 2 的完整一圈可建墙格(黄区外圈)。"""
+    station = turn.station()
+    if station is None:
+        return ()
+    return tuple(
+        pos for pos in _cells_at_distance(station.pos, 2) if turn.land(pos)
     )
-    return tuple(pos for cells in edge_cells for pos in cells)
+
+
+def _center_facing_sides(turn: World) -> frozenset[str]:
+    """指向地图中心的那两条边:东/西与南/北各取朝向中心的一侧。"""
+    bounds = _station_bounds(turn)
+    if bounds is None:
+        return frozenset()
+    xmin, xmax, ymin, ymax = bounds
+    center = _map_center(turn)
+    dx = center.x - (xmin + xmax) / 2
+    dy = center.y - (ymin + ymax) / 2
+    sides: set[str] = set()
+    if dx > 0:
+        sides.add("east")
+    elif dx < 0:
+        sides.add("west")
+    if dy > 0:
+        sides.add("north")
+    elif dy < 0:
+        sides.add("south")
+    return frozenset(sides)
+
+
+def _wall_sides(pos: Pos, turn: World) -> frozenset[str]:
+    bounds = _station_bounds(turn)
+    if bounds is None:
+        return frozenset()
+    xmin, xmax, ymin, ymax = bounds
+    sides: set[str] = set()
+    if pos.y == ymin - 2:
+        sides.add("south")
+    if pos.y == ymax + 2:
+        sides.add("north")
+    if pos.x == xmin - 2:
+        sides.add("west")
+    if pos.x == xmax + 2:
+        sides.add("east")
+    return frozenset(sides)
+
+
+def _wall_order(turn: World) -> tuple[Pos, ...]:
+    """第一天目标墙位:朝向地图中心的约一半围墙,按距中心从近到远建造。
+
+    旧实现按整边排序并在东南侧留缺口,挑战者(左上)的缺口正好开在朝向
+    中心的正面,且会把背向中心的边也排进建造清单。现在只保留中心朝向
+    的两条边(约 50%),背面自然留作出入口。
+    """
+    center = _map_center(turn)
+    facing = _center_facing_sides(turn)
+    chosen = [
+        pos for pos in _wall_ring(turn)
+        if _wall_sides(pos, turn) & facing
+    ]
+    if not chosen:
+        ring = list(_wall_ring(turn))
+        ring.sort(key=lambda pos: (distance(pos, center), pos.x, pos.y))
+        quota = max(1, (len(ring) + 1) // 2) if ring else 0
+        return tuple(ring[:quota])
+    chosen.sort(key=lambda pos: (distance(pos, center), pos.x, pos.y))
+    return tuple(chosen)
 
 
 def _cells_at_distance(station_pos: Pos, radius: int) -> tuple[Pos, ...]:

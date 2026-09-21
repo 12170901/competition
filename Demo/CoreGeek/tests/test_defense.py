@@ -4,13 +4,22 @@
 从不建墙,导致第 71 回合机器人涌来时基地无墙可守而失败。
 本文件针对两项修复做回归:
   1. brain._wall_order / brain._tower_sites 优先朝向地图中央建防御;
+     第一天只建朝向中心的约 50% 围墙,背面留作出入口;
   2. brain._worker_day 在墙未建齐时优先建墙,而非先卖矿/采矿。
 """
 
 from __future__ import annotations
 
-from agent.brain import _tower_sites, _wall_order, _map_center, decide
-from agent.protocol import distance
+from agent.brain import (
+    _center_facing_sides,
+    _map_center,
+    _tower_sites,
+    _wall_order,
+    _wall_ring,
+    _wall_sides,
+    decide,
+)
+from agent.protocol import Pos, distance
 from agent.world import World
 
 VALID_ACTIONS = {
@@ -37,32 +46,79 @@ def _strip_roles(payload, keep_wall=False):
     return payload
 
 
+def _set_station(payload, x, y):
+    for role in payload["teamOur"]["roles"]:
+        if role.get("roleType") == "station":
+            role["pos"] = {"x": x, "y": y}
+            return
+    raise AssertionError("payload 中没有 station")
+
+
+def _assert_day1_center_walls(world: World) -> tuple[Pos, ...]:
+    """第一天墙位必须是朝向地图中心的约一半外圈,且由近到远。"""
+    center = _map_center(world)
+    ring = _wall_ring(world)
+    order = _wall_order(world)
+    facing = _center_facing_sides(world)
+    assert ring, "地图应有完整墙圈"
+    assert order, "第一天应有朝向中心的可建墙位"
+    assert facing, "基地相对地图中心应能判定朝向边"
+    ratio = len(order) / len(ring)
+    assert 0.4 <= ratio <= 0.6, (
+        f"第一天墙位应约为整圈的 50%: got {len(order)}/{len(ring)}={ratio:.2f}"
+    )
+    assert all(_wall_sides(pos, world) & facing for pos in order), (
+        f"第一天墙位必须落在朝向中心的边上: facing={sorted(facing)} order={order}"
+    )
+    ring_min = min(distance(pos, center) for pos in ring)
+    assert distance(order[0], center) == ring_min, (
+        f"最先建造的墙应是整圈最靠中心的格子: 首={order[0]} "
+        f"dist={distance(order[0], center)} 全局最小={ring_min}"
+    )
+    dists = [distance(pos, center) for pos in order]
+    assert dists == sorted(dists), "朝向中心的墙位应按距中心从近到远建造"
+    back_sides = {"north", "south", "east", "west"} - set(facing)
+    back_cells = [pos for pos in ring if _wall_sides(pos, world) <= back_sides]
+    assert back_cells, "背面应留空作出入口"
+    assert not (set(order) & set(back_cells)), "第一天不得把背向中心的墙排进计划"
+    return order
+
+
 def test_wall_order_faces_map_center(make_payload):
-    """朝向修复:墙位建造顺序应优先朝向地图中央(defender 基地在中央东北方)。"""
+    """朝向修复:挑战者(左上)第一天只建朝向地图中央的约一半围墙。"""
     payload = make_payload(roundNo=1)
     payload = _strip_roles(payload)
     world = World.load(payload)
-    center = _map_center(world)
-    order = _wall_order(world)
-    assert order, "地图应有可建墙位"
-    # 4 条边按"每边到中央的最小距离"排序:第一条边必含全局最靠中央的墙位
-    global_min = min(distance(pos, center) for pos in order)
-    first_edge = order[0]
-    assert distance(first_edge, center) == global_min, (
-        f"排序后第一条边应包含最靠中央的墙位:首={first_edge}(dist="
-        f"{distance(first_edge, center)}), 全局最小={global_min}"
-    )
-    # 边顺序整体应由近到远:把墙位按距离分区,验证前半段整体不劣于后半段
-    half = (len(order) - 1) // 2
-    front = order[: half + 1]
-    back = order[half + 1:]
-    assert min(distance(p, center) for p in front) <= min(
-        distance(p, center) for p in back
-    ), "墙位前半段朝向中央侧优先"
+    order = _assert_day1_center_walls(world)
+    assert _center_facing_sides(world) == frozenset({"east", "south"})
+    assert all(pos.x == 13 or pos.y == 21 for pos in order)
+
+
+def test_wall_order_faces_map_center_for_defender(make_payload):
+    """朝向修复:防守者(右下)第一天只建朝向地图中央的约一半围墙。"""
+    payload = make_payload(roundNo=1)
+    payload = _strip_roles(payload)
+    payload["teamOur"]["type"] = "defender"
+    _set_station(payload, 30, 10)
+    world = World.load(payload)
+    order = _assert_day1_center_walls(world)
+    assert _center_facing_sides(world) == frozenset({"west", "north"})
+    assert all(pos.x == 28 or pos.y == 12 for pos in order)
+
+
+def test_day1_wall_quota_is_about_half(make_payload):
+    """数量:第一天计划墙位约为完整外圈的一半,两侧阵营都成立。"""
+    payload = make_payload(roundNo=1)
+    payload = _strip_roles(payload)
+    challenger = World.load(payload)
+    _assert_day1_center_walls(challenger)
+    payload["teamOur"]["type"] = "defender"
+    _set_station(payload, 30, 10)
+    _assert_day1_center_walls(World.load(payload))
 
 
 def test_tower_sites_faces_map_center(make_payload):
-    """朝向修复:塔位首选应朝向地图中央(defender 基地在中央东北方)。"""
+    """朝向修复:塔位首选应朝向地图中央。"""
     payload = make_payload(roundNo=1)
     payload = _strip_roles(payload)
     world = World.load(payload)
@@ -98,6 +154,35 @@ def test_worker_builds_wall_when_towers_done(make_payload):
 
     sells = [cmd for cmd in response.values() if cmd["action"] == "sell"]
     assert not sells, "墙未建齐时不应出现 sell(不被卖矿抢占)"
+    for cmd in builds:
+        target = cmd["targetPos"][0]
+        assert target["x"] == 13 or target["y"] == 21, (
+            f"第一天应建朝向中心的墙,不应建背面: {target}"
+        )
+
+
+def test_day1_worker_does_not_build_back_wall(make_payload):
+    """第一天工人即使站在背面墙位旁,也不得把墙建在背向地图中心的一侧。"""
+    payload = make_payload(roundNo=1)
+    payload = _strip_roles(payload)
+    payload["teamOur"]["roles"] = [
+        role for role in payload["teamOur"]["roles"] if role.get("roleType") != "wall"
+    ]
+    for role in payload["teamOur"]["roles"]:
+        if role.get("roleType") == "worker":
+            # (9,23) 紧邻西侧背面墙位 (8,23),且够不着朝向中心的墙
+            role["pos"] = {"x": 9, "y": 23}
+            role["backpack"] = ["stone", "stone", "stone", "stone", "stone"]
+            break
+    response = decide(payload)
+    _validate_decision(response, payload)
+    for cmd in response.values():
+        if cmd["action"] != "build" or cmd.get("name") != "wall":
+            continue
+        target = cmd["targetPos"][0]
+        assert target["x"] == 13 or target["y"] == 21, (
+            f"第一天不得在背面建墙: {target}"
+        )
 
 
 def test_worker_builds_wall_over_selling(make_payload):
@@ -126,11 +211,29 @@ def test_worker_builds_wall_over_selling(make_payload):
 
 
 def test_worker_returns_to_selling_when_walls_done(make_payload):
-    """人手分配:墙已建齐(带 keep_wall)时,工人回到卖矿路线(不再强制建墙)。"""
+    """人手分配:朝向中心的约一半墙已建齐时,工人回到卖矿路线(不再强制建墙)。"""
     payload = make_payload(roundNo=1)
-    payload = _strip_roles(payload, keep_wall=True)
+    payload = _strip_roles(payload)
+    payload["teamOur"]["roles"] = [
+        role for role in payload["teamOur"]["roles"] if role.get("roleType") != "wall"
+    ]
+    world = World.load(payload)
+    for index, cell in enumerate(_wall_order(world)):
+        payload["teamOur"]["roles"].append(
+            {
+                "id": 40000 + index,
+                "pos": {"x": cell.x, "y": cell.y},
+                "roleType": "wall",
+                "health": 1000,
+                "level": 1,
+                "attackPower": 0,
+                "attackRange": 0,
+                "backpack": [],
+            }
+        )
     for role in payload["teamOur"]["roles"]:
         if role.get("roleType") == "worker":
+            role["pos"] = {"x": 5, "y": 23}
             role["backpack"] = ["stone", "iron", "copper"]
             break
     response = decide(payload)
@@ -141,7 +244,7 @@ def test_worker_returns_to_selling_when_walls_done(make_payload):
     ]
     for cmd in builds:
         assert cmd.get("name") != "wall", \
-            "墙已建齐不应再强制建墙(回到经营路线)"
+            "第一天朝向中心的墙已建齐不应再强制建墙(回到经营路线)"
 
 
 def test_decide_contract_holds_with_wall_priority(make_payload):
