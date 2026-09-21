@@ -21,10 +21,12 @@ from .jobs import (
     clear_job,
     get_job,
     is_builder,
+    is_edge_miner,
     set_job,
 )
 from .monitor import scan_idle
 from .protocol import (
+    DAY_ROUNDS,
     Pos,
     TOWER_TYPES,
     Unit,
@@ -60,7 +62,9 @@ from .world import HERO_MAX_HP, World, backpack_item, count_item
 
 TOWER_LOADOUT = ("gatling", "railgun", "rocket")
 STONE_KEEP = 4
-RECALL_FROM = 56
+RECALL_ROUNDS = 5
+RECALL_FROM = DAY_ROUNDS - RECALL_ROUNDS + 1
+EDGE_MINE_MAX = 4
 _NEIGHBOUR_STEPS = (
     (-1, -1), (-1, 0), (-1, 1),
     (0, -1), (0, 1),
@@ -145,7 +149,10 @@ def _worker_day(
         return gold_left, builds_left
     if _try_upgrade_or_fix(turn, role, commands):
         return gold_left, builds_left
-    if _in_recall(turn):
+    if _should_edge_mine(turn, role, memory):
+        _run_edge_mine(turn, role, claimed, commands, memory)
+        return gold_left, builds_left
+    if _should_home(turn, role, memory):
         if walls_missing and count_item(role, WALL_MATERIAL):
             for site in list(walls_missing):
                 if site in claimed or distance(role.pos, site) > 1 or role.pos == site:
@@ -183,6 +190,90 @@ def _worker_day(
 
 def _in_recall(turn: World) -> bool:
     return bool(turn.is_day) and turn.round_in_day >= RECALL_FROM
+
+
+def _should_home(turn: World, role: Unit, memory) -> bool:
+    return _in_recall(turn) and not is_edge_miner(turn, memory, role.unit_id)
+
+
+def _should_edge_mine(turn: World, role: Unit, memory) -> bool:
+    if not is_edge_miner(turn, memory, role.unit_id):
+        return False
+    return (not turn.is_day) or _in_recall(turn)
+
+
+def _edge_distance(turn: World, pos: Pos) -> int:
+    return min(pos.x, pos.y, turn.width - 1 - pos.x, turn.height - 1 - pos.y)
+
+
+def _is_edge_mine(turn: World, pos: Pos) -> bool:
+    return _edge_distance(turn, pos) <= EDGE_MINE_MAX
+
+
+def _pick_edge_mine(
+    turn: World,
+    role: Unit,
+    claimed: set[Pos],
+    extra: set[Pos],
+) -> tuple[Pos, str] | None:
+    blocked = set(claimed)
+    blocked.update(extra)
+    metals: list[tuple[Pos, str]] = []
+    others: list[tuple[Pos, str]] = []
+    for pos, kind in turn.all_mines():
+        if pos in blocked:
+            continue
+        if kind in ("copper", "iron"):
+            metals.append((pos, kind))
+        else:
+            others.append((pos, kind))
+    pool = metals or others
+    if not pool:
+        return None
+    center = _map_center(turn)
+    return min(
+        pool,
+        key=lambda item: (
+            _edge_distance(turn, item[0]),
+            -turn.vendor_price(item[1]),
+            -distance(item[0], center),
+            distance(role.pos, item[0]),
+            item[0].x,
+            item[0].y,
+        ),
+    )
+
+
+def _run_edge_mine(
+    turn: World,
+    role: Unit,
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+    memory,
+) -> bool:
+    """回防窗口与黑夜:矿工只在地图边缘采矿,不穿过中央去小贩。"""
+    if role.backpack_full:
+        return False
+    taken = claimed_targets(memory, role.unit_id)
+    job = get_job(memory, role.unit_id)
+    mines = dict(turn.all_mines())
+    if (
+        job is not None
+        and job.kind == KIND_MINE
+        and job.target is not None
+        and job.target in mines
+        and _is_edge_mine(turn, job.target)
+    ):
+        target = job
+    else:
+        picked = _pick_edge_mine(turn, role, claimed, taken)
+        if picked is None:
+            return False
+        pos, kind = picked
+        target = _keep_job(
+            memory, role, KIND_MINE, target=pos, name=kind, round_no=turn.round_no,
+        )
+    return _execute_mine(turn, role, target, claimed, commands)
 
 
 def _keep_job(
@@ -265,7 +356,7 @@ def _worker_job_valid(
         keep = 1 if walls_missing else 0
         return turn.vendor() is not None and _sellable_ore(role, turn, keep) is not None
     if job.kind == KIND_RECALL:
-        return _in_recall(turn)
+        return _should_home(turn, role, memory)
     return False
 
 
@@ -543,7 +634,7 @@ def _pioneer_day(
     if turn.phase_task:
         _keep_job(memory, role, KIND_PHASE, round_no=turn.round_no)
         return _run_task(turn, role, memory, claimed, commands)
-    if _in_recall(turn):
+    if _should_home(turn, role, memory):
         _keep_job(
             memory, role, KIND_RECALL, target=_recall_target(turn),
             round_no=turn.round_no,
@@ -616,7 +707,7 @@ def _pioneer_job_valid(turn: World, role: Unit, job: Job, memory) -> bool:
     if job.kind == KIND_PHASE:
         return bool(turn.phase_task)
     if job.kind == KIND_RECALL:
-        return _in_recall(turn)
+        return _should_home(turn, role, memory)
     return False
 
 
@@ -711,6 +802,10 @@ def _night(
         if role.unit_id in busy:
             continue
         if _try_heal(role, commands):
+            busy.add(role.unit_id)
+            continue
+        if is_edge_miner(turn, memory, role.unit_id):
+            _run_edge_mine(turn, role, claimed, commands, memory)
             busy.add(role.unit_id)
             continue
         if _try_night_item(turn, role, commands):

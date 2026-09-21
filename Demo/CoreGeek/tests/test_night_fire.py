@@ -101,8 +101,8 @@ def test_no_robot_no_attack(make_payload):
     assert all(cmd["action"] != "attack" for cmd in response.values())
 
 
-def test_three_heroes_three_towers_all_fire(make_payload):
-    """三名英雄分别贴三座塔,射程内有怪 → 三条 attack。"""
+def test_three_heroes_two_towers_fire_miner_not_gunner(make_payload):
+    """黑夜只安排两人操塔,矿工即使站在塔旁也不开火。"""
     payload = fresh(make_payload(roundNo=85, phaseTask=""))
     place(payload, WORKER_1, 8, 24, backpack=[], health=220)
     place(payload, WORKER_2, 11, 25, backpack=[], health=220)
@@ -110,9 +110,10 @@ def test_three_heroes_three_towers_all_fire(make_payload):
     payload["robot"] = _robots((7, 23))
     response = decide(payload)
     _validate(response, payload)
-    attacks = [
-        key for key, cmd in response.items() if cmd["action"] == "attack"
-    ]
-    assert set(attacks) == {str(GATLING), str(RAILGUN), str(ROCKET)}
-    controllers = {cmd["controllerId"] for cmd in response.values() if cmd["action"] == "attack"}
-    assert controllers == {str(WORKER_1), str(WORKER_2), str(PIONEER)}
+    controllers = {
+        cmd["controllerId"] for cmd in response.values() if cmd["action"] == "attack"
+    }
+    assert str(WORKER_1) in controllers
+    assert str(PIONEER) in controllers
+    assert str(WORKER_2) not in controllers
+    assert action_of(response, WORKER_2) in {"move", "collect", None}
