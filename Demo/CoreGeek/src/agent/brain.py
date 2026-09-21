@@ -21,7 +21,6 @@ from .jobs import (
     clear_job,
     get_job,
     is_builder,
-    is_edge_miner,
     set_job,
 )
 from .monitor import scan_idle
@@ -60,7 +59,7 @@ from .tasks import (
 )
 from .world import HERO_MAX_HP, World, backpack_item, count_item
 
-TOWER_LOADOUT = ("gatling", "railgun", "rocket")
+TOWER_LOADOUT = ("rocket", "rocket", "rocket")
 STONE_KEEP = 4
 RECALL_ROUNDS = 5
 RECALL_FROM = DAY_ROUNDS - RECALL_ROUNDS + 1
@@ -92,6 +91,7 @@ def decide(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         execute_cmd, prompt = _day(turn, memory, commands)
     else:
         execute_cmd, prompt = _night(turn, memory, commands)
+    _fill_idle(turn, memory, commands)
     scan_idle(turn, commands)
     set_extra(prompt, execute_cmd)
     write_round_log(turn, commands, prompt, execute_cmd)
@@ -163,9 +163,6 @@ def _worker_day(
                 if step is not None:
                     commands[role.unit_id] = move_command(step)
                     return gold_left, builds_left
-    if _should_edge_mine(turn, role, memory):
-        _run_edge_mine(turn, role, claimed, commands, memory)
-        return gold_left, builds_left
     if _should_home(turn, role, memory):
         if walls_missing and count_item(role, WALL_MATERIAL):
             for site in list(walls_missing):
@@ -291,13 +288,11 @@ def _try_weapon_upgrade_shop(
 
 
 def _should_home(turn: World, role: Unit, memory) -> bool:
-    return _in_recall(turn) and not is_edge_miner(turn, memory, role.unit_id)
+    return _in_recall(turn)
 
 
 def _should_edge_mine(turn: World, role: Unit, memory) -> bool:
-    if not is_edge_miner(turn, memory, role.unit_id):
-        return False
-    return (not turn.is_day) or _in_recall(turn)
+    return False
 
 
 def _edge_distance(turn: World, pos: Pos) -> int:
@@ -850,18 +845,18 @@ def _night(
     if turn.phase_task:
         pioneer = turn.pioneer()
         if pioneer is not None:
-            execute_cmd, prompt = _run_task(
-                turn, pioneer, memory, claimed, commands,
-            )
-            busy.add(pioneer.unit_id)
+            execute_cmd, answer = next_task_command(turn, memory)
+            if answer:
+                commands[pioneer.unit_id] = submit_answer_command(answer)
+                busy.add(pioneer.unit_id)
+                execute_cmd = ""
+            if can_prompt(turn, memory):
+                prompt = task_prompt(turn)
+                mark_prompt(turn, memory)
     for role in turn.controllable():
         if role.unit_id in busy:
             continue
         if _try_heal(role, commands):
-            busy.add(role.unit_id)
-            continue
-        if is_edge_miner(turn, memory, role.unit_id):
-            _run_edge_mine(turn, role, claimed, commands, memory)
             busy.add(role.unit_id)
             continue
         if _try_night_item(turn, role, commands):
@@ -877,6 +872,10 @@ def _night(
             targets = attack_positions(turn, tower)
             if targets:
                 commands[tower.unit_id] = attack_commands(role.unit_id, targets)
+            else:
+                turn.note(
+                    f"角色 {role.unit_id} 已贴塔 {tower.unit_id} 待命（射程内无目标）"
+                )
             continue
         step = _step_toward(turn, role, tower.pos, claimed)
         if step is not None:
@@ -884,6 +883,41 @@ def _night(
     if not prompt:
         prompt = _maybe_prompt(turn, memory)
     return execute_cmd, prompt
+
+
+def _controller_ids(commands: dict[int, dict[str, Any]]) -> set[int]:
+    ids: set[int] = set()
+    for command in commands.values():
+        if command.get("action") != "attack":
+            continue
+        raw = command.get("controllerId")
+        if raw is None:
+            continue
+        try:
+            ids.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _fill_idle(turn: World, memory, commands: dict[int, dict[str, Any]]) -> None:
+    """真正没事做的英雄走近最近的塔,避免站桩。贴塔开火/任务点待命的不算空闲。"""
+    claimed: set[Pos] = set()
+    for command in commands.values():
+        if command.get("action") != "move":
+            continue
+        raw = (command.get("targetPos") or [None])[0]
+        if isinstance(raw, dict):
+            claimed.add(Pos.load(raw))
+    busy = set(commands) | _controller_ids(commands)
+    for role in turn.controllable():
+        if role.unit_id in busy:
+            continue
+        if any(distance(role.pos, tower.pos) <= 1 for tower in turn.weapons()):
+            continue
+        if turn.is_day and role.kind == "pioneer" and _near_own_task(turn, role):
+            continue
+        _recall_to_tower(turn, role, claimed, commands)
 
 
 def _maybe_prompt(turn: World, memory) -> str:

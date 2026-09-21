@@ -234,12 +234,12 @@ def with_day1_towers(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def place_heroes_on_guns(payload: dict[str, Any]) -> dict[str, Any]:
-    """建造工+开拓者贴塔,矿工去地图边缘铜矿,模拟两人回防一人边缘采。"""
+    """三人全部贴塔,保证第一夜三座炮都有人操控。"""
     payload = copy.deepcopy(payload)
     spots = {
         WORKER_1: Pos(28, 8),
         PIONEER: Pos(28, 10),
-        WORKER_2: Pos(37, 25),
+        WORKER_2: Pos(28, 9),
     }
     for role in payload["teamOur"]["roles"]:
         if role["id"] in spots:
@@ -293,7 +293,7 @@ def spawn_small_robots(payload: dict[str, Any], count: int | None = None) -> dic
 
 
 def night1() -> dict[str, Any]:
-    """第一夜第1回合:三塔已建、两人贴塔、矿工在边缘铜矿、15 只小兵刷在基地角落。"""
+    """第一夜第1回合:三塔已建、三人贴塔、15 只小兵刷在基地角落。"""
     payload = new_game()
     payload = with_day1_towers(payload)
     payload = place_heroes_on_guns(payload)

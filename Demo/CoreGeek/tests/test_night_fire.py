@@ -101,19 +101,35 @@ def test_no_robot_no_attack(make_payload):
     assert all(cmd["action"] != "attack" for cmd in response.values())
 
 
-def test_three_heroes_two_towers_fire_miner_not_gunner(make_payload):
-    """黑夜只安排两人操塔,矿工即使站在塔旁也不开火。"""
+def test_three_heroes_three_towers_all_fire(make_payload):
+    """黑夜三人分别贴三塔,射程内有怪:三座塔都要开火。"""
     payload = fresh(make_payload(roundNo=85, phaseTask=""))
     place(payload, WORKER_1, 8, 24, backpack=[], health=220)
     place(payload, WORKER_2, 11, 25, backpack=[], health=220)
     place(payload, PIONEER, 8, 25, backpack=["Medicine"], health=200)
-    payload["robot"] = _robots((7, 23))
+    payload["robot"] = _robots((7, 23), (10, 26), (8, 26))
     response = decide(payload)
     _validate(response, payload)
     controllers = {
         cmd["controllerId"] for cmd in response.values() if cmd["action"] == "attack"
     }
     assert str(WORKER_1) in controllers
+    assert str(WORKER_2) in controllers
     assert str(PIONEER) in controllers
-    assert str(WORKER_2) not in controllers
-    assert action_of(response, WORKER_2) in {"move", "collect", None}
+    assert action_of(response, WORKER_2) != "collect"
+
+
+def test_night_pioneer_with_phase_task_still_fires(make_payload):
+    """黑夜即使还有 phaseTask,开拓者也必须去操塔,不能留在任务点。"""
+    payload = fresh(make_payload(roundNo=85, phaseTask="请阅读task_1_alpha.md，获取任务信息"))
+    place(payload, WORKER_1, 8, 24, backpack=[], health=220)
+    place(payload, WORKER_2, 11, 25, backpack=[], health=220)
+    place(payload, PIONEER, 8, 25, backpack=["Medicine"], health=200)
+    payload["robot"] = _robots((7, 24))
+    response = decide(payload)
+    _validate(response, payload)
+    controllers = {
+        cmd["controllerId"] for cmd in response.values() if cmd["action"] == "attack"
+    }
+    assert str(PIONEER) in controllers
+    assert action_of(response, PIONEER) not in {"acceptTask", "move"}
