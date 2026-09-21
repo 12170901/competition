@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from .jobs import Job, update_fail_streaks
 from .protocol import Pos, Unit
 from .world import World, backpack_item, count_item
 
@@ -39,6 +40,8 @@ class Memory:
     task_step: int = 0
     last_task: str = ""
     pending_answer: str = ""
+    jobs: dict[int, Job] = field(default_factory=dict)
+    roles: dict[int, str] = field(default_factory=dict)
 
 
 MEMORY = Memory()
@@ -53,7 +56,10 @@ def observe(turn: World) -> Memory:
         memory.task_step = 0
         memory.last_task = ""
         memory.pending_answer = ""
+        memory.jobs.clear()
+        memory.roles.clear()
     memory.last_round = turn.round_no
+    update_fail_streaks(turn, memory)
     if turn.llm_limited():
         memory.llm_used = LLM_PER_DAY
     if turn.folk_legends and (
