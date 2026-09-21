@@ -168,10 +168,13 @@ def _worker_day(
     if job is not None and _worker_job_valid(
         turn, role, job, memory, walls_missing, towers_missing, gold_left,
     ):
-        return _run_worker_job(
+        gold_left, builds_left = _run_worker_job(
             turn, role, job, sites, towers_missing, walls_missing,
             claimed, commands, gold_left, builds_left, memory,
         )
+        if role.unit_id in commands:
+            return gold_left, builds_left
+        clear_job(memory, role.unit_id)
     return _pick_worker_job(
         turn, role, sites, towers_missing, walls_missing,
         claimed, commands, gold_left, builds_left, memory,
@@ -330,10 +333,13 @@ def _pick_worker_job(
                 memory, role, KIND_TOWER, target=site,
                 name=TOWER_LOADOUT[index], round_no=turn.round_no,
             )
-            return _run_worker_job(
+            gold_left, builds_left = _run_worker_job(
                 turn, role, job, sites, towers_missing, walls_missing,
                 claimed, commands, gold_left, builds_left, memory,
             )
+            if role.unit_id in commands:
+                return gold_left, builds_left
+            clear_job(memory, role.unit_id)
     if builder and walls_missing:
         stone = _nearest_mine(turn, role, WALL_MATERIAL, claimed, taken)
         target = stone
@@ -347,10 +353,13 @@ def _pick_worker_job(
             name=WALL_MATERIAL if stone is not None else WALL,
             round_no=turn.round_no,
         )
-        return _run_worker_job(
+        gold_left, builds_left = _run_worker_job(
             turn, role, job, sites, towers_missing, walls_missing,
             claimed, commands, gold_left, builds_left, memory,
         )
+        if role.unit_id in commands:
+            return gold_left, builds_left
+        clear_job(memory, role.unit_id)
     want = _wanted_item(turn, role, gold_left, memory)
     if want and _try_shop(turn, role, claimed, commands, gold_left, memory):
         if role.unit_id in commands and commands[role.unit_id]["action"] == "buy":
@@ -368,14 +377,27 @@ def _pick_worker_job(
             round_no=turn.round_no,
         )
         return gold_left, builds_left
-    picked = _pick_ranked_mine(turn, role, claimed, memory)
-    if picked is not None:
-        pos, kind = picked
+    ranked = []
+    taken = claimed_targets(memory, role.unit_id)
+    for pos, kind in turn.all_mines():
+        if pos in claimed or pos in taken:
+            continue
+        ranked.append((pos, kind))
+    ranked.sort(
+        key=lambda item: (
+            -turn.vendor_price(item[1]),
+            distance(role.pos, item[0]),
+            item[0].x,
+            item[0].y,
+        ),
+    )
+    for pos, kind in ranked:
         job = _keep_job(
             memory, role, KIND_MINE, target=pos, name=kind, round_no=turn.round_no,
         )
-        _execute_mine(turn, role, job, claimed, commands)
-        return gold_left, builds_left
+        if _execute_mine(turn, role, job, claimed, commands):
+            return gold_left, builds_left
+        clear_job(memory, role.unit_id)
     return gold_left, builds_left
 
 
