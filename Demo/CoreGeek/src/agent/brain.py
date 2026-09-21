@@ -714,57 +714,40 @@ def _wall_ring(turn: World) -> tuple[Pos, ...]:
     )
 
 
+def _center_facing_east(turn: World) -> bool:
+    """来敌方向只看左右:中心在基地东侧则砌东半圈,否则砌西半圈。"""
+    bounds = _station_bounds(turn)
+    if bounds is None:
+        return True
+    xmin, xmax, _, _ = bounds
+    return _map_center(turn).x >= (xmin + xmax) / 2
+
+
 def _center_facing_sides(turn: World) -> frozenset[str]:
-    """指向地图中心的那两条边:东/西与南/北各取朝向中心的一侧。"""
-    bounds = _station_bounds(turn)
-    if bounds is None:
+    if _station_bounds(turn) is None:
         return frozenset()
-    xmin, xmax, ymin, ymax = bounds
-    center = _map_center(turn)
-    dx = center.x - (xmin + xmax) / 2
-    dy = center.y - (ymin + ymax) / 2
-    sides: set[str] = set()
-    if dx > 0:
-        sides.add("east")
-    elif dx < 0:
-        sides.add("west")
-    if dy > 0:
-        sides.add("north")
-    elif dy < 0:
-        sides.add("south")
-    return frozenset(sides)
+    return frozenset({"east" if _center_facing_east(turn) else "west"})
 
 
-def _wall_sides(pos: Pos, turn: World) -> frozenset[str]:
+def _on_incoming_side(pos: Pos, turn: World) -> bool:
     bounds = _station_bounds(turn)
     if bounds is None:
-        return frozenset()
-    xmin, xmax, ymin, ymax = bounds
-    sides: set[str] = set()
-    if pos.y == ymin - 2:
-        sides.add("south")
-    if pos.y == ymax + 2:
-        sides.add("north")
-    if pos.x == xmin - 2:
-        sides.add("west")
-    if pos.x == xmax + 2:
-        sides.add("east")
-    return frozenset(sides)
+        return False
+    xmin, xmax, _, _ = bounds
+    mid_x = (xmin + xmax) / 2
+    if _center_facing_east(turn):
+        return pos.x > mid_x
+    return pos.x < mid_x
 
 
 def _wall_order(turn: World) -> tuple[Pos, ...]:
-    """第一天目标墙位:朝向地图中心的约一半围墙,按距中心从近到远建造。
+    """第一天目标墙位:按左右朝向地图中心的约一半围墙,由近到远建造。
 
-    旧实现按整边排序并在东南侧留缺口,挑战者(左上)的缺口正好开在朝向
-    中心的正面,且会把背向中心的边也排进建造清单。现在只保留中心朝向
-    的两条边(约 50%),背面自然留作出入口。
+    来敌方向只看东西。左上挑战者砌东半圈,右下防守者砌西半圈;
+    南北边只保留靠中心的那一半,远离中心的半圈留作出入口。
     """
     center = _map_center(turn)
-    facing = _center_facing_sides(turn)
-    chosen = [
-        pos for pos in _wall_ring(turn)
-        if _wall_sides(pos, turn) & facing
-    ]
+    chosen = [pos for pos in _wall_ring(turn) if _on_incoming_side(pos, turn)]
     if not chosen:
         ring = list(_wall_ring(turn))
         ring.sort(key=lambda pos: (distance(pos, center), pos.x, pos.y))
