@@ -143,6 +143,8 @@ def test_worker_builds_wall_when_towers_done(make_payload):
         role for role in payload["teamOur"]["roles"] if role.get("roleType") != "wall"
     ]
     for role in payload["teamOur"]["roles"]:
+        if role.get("roleType") in ("gatling", "railgun", "rocket"):
+            role["level"] = 2
         if role.get("roleType") == "worker":
             # 紧邻东侧墙位(13,21),带足石头应直接 build wall
             role["pos"] = {"x": 12, "y": 21}
@@ -197,6 +199,8 @@ def test_worker_builds_wall_over_selling(make_payload):
         role for role in payload["teamOur"]["roles"] if role.get("roleType") != "wall"
     ]
     for role in payload["teamOur"]["roles"]:
+        if role.get("roleType") in ("gatling", "railgun", "rocket"):
+            role["level"] = 2
         if role.get("roleType") == "worker":
             # 紧邻墙位、带足石头,同时携铁/铜(可卖)验证不被 sell 抢占
             role["pos"] = {"x": 12, "y": 21}

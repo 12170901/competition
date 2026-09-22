@@ -14,6 +14,7 @@ from tests.helpers import (
     move_pos,
     park_other_worker_building,
     place,
+    set_tower_levels,
 )
 
 VALID_ACTIONS = {
@@ -93,10 +94,25 @@ def test_uses_weapon_voucher_on_tower_before_walls(make_payload):
     assert command.get("name") == "WeaponUpgradeVoucher1"
 
 
-def test_after_round_30_builds_wall_when_cannot_upgrade(make_payload):
-    """第 35 回合、金币不够升塔、工人墙边有石头:开始建墙。"""
+def test_after_round_30_level1_towers_do_not_wall(make_payload):
+    """塔仍是 1 级时第 35 回合也不砌墙,继续经营攒升塔钱。"""
     payload = fresh(make_payload(roundNo=35))
     drop_walls(payload)
+    payload["teamOur"]["goldNum"] = 0
+    place(payload, WORKER_1, 12, 21, backpack=["stone", "stone", "stone", "stone"])
+    place(payload, PIONEER, 8, 24, backpack=["Medicine"])
+    response = decide(payload)
+    _validate(response, payload)
+    command = response.get(str(WORKER_1))
+    assert command is not None
+    assert not (command["action"] == "build" and command.get("name") == "wall")
+
+
+def test_after_round_30_builds_wall_when_towers_upgraded(make_payload):
+    """塔已升到 2 级、金币不够再升、工人墙边有石头:开始建墙。"""
+    payload = fresh(make_payload(roundNo=35))
+    drop_walls(payload)
+    set_tower_levels(payload, 2)
     payload["teamOur"]["goldNum"] = 0
     place(payload, WORKER_1, 12, 21, backpack=["stone", "stone", "stone", "stone"])
     place(payload, PIONEER, 8, 24, backpack=["Medicine"])
@@ -123,6 +139,7 @@ def test_after_round_30_missing_walls_walk_to_stone(make_payload):
     """砌墙阶段墙未齐、金币不够升塔:不贴矿的工人应走向石矿。"""
     payload = fresh(make_payload(roundNo=35))
     drop_walls(payload)
+    set_tower_levels(payload, 2)
     park_other_worker_building(payload)
     payload["teamOur"]["goldNum"] = 0
     start = Pos(20, 15)

@@ -59,10 +59,11 @@ from .tasks import (
 )
 from .world import HERO_MAX_HP, World, backpack_item, count_item
 
-TOWER_LOADOUT = ("rocket", "rocket", "rocket")
+TOWER_LOADOUT = ("rocket", "railgun", "gatling")
 STONE_KEEP = 4
 RECALL_ROUNDS = 5
 RECALL_FROM = DAY_ROUNDS - RECALL_ROUNDS + 1
+RECALL_SLACK = 4
 WALL_FROM = 30
 EDGE_MINE_MAX = 4
 _NEIGHBOUR_STEPS = (
@@ -244,9 +245,45 @@ def _in_recall(turn: World) -> bool:
     return bool(turn.is_day) and turn.round_in_day >= RECALL_FROM
 
 
+def _recall_slack(turn: World) -> int:
+    """切比雪夫低估绕路; 天数越高夜间兵越多,多留几回合。"""
+    return RECALL_SLACK + 2 + max(0, turn.day_index - 1)
+
+
+def _travel_home(turn: World, pos: Pos) -> int:
+    target = _recall_target(turn)
+    if target is None:
+        return 0
+    return distance(pos, target)
+
+
+def _can_return_from(turn: World, role: Unit, dest: Pos) -> bool:
+    if not turn.is_day:
+        return True
+    slack = _recall_slack(turn)
+    home = _recall_target(turn) or dest
+    go = distance(role.pos, dest)
+    back = distance(dest, home)
+    return turn.round_in_day + go + back + slack < DAY_ROUNDS
+
+
+def _should_home(turn: World, role: Unit, memory) -> bool:
+    if not turn.is_day:
+        return False
+    if _in_recall(turn):
+        return True
+    travel = _travel_home(turn, role.pos)
+    return turn.round_in_day + travel + _recall_slack(turn) >= DAY_ROUNDS
+
+
 def _wall_phase(turn: World) -> bool:
-    """开局前 29 回合只建塔/经营; 第 30 回合起才进入砌墙阶段。"""
-    return turn.round_no >= WALL_FROM
+    """塔还是 1 级时继续攒钱升塔; 全部至少 2 级且过了第 30 回合才砌墙。"""
+    if turn.round_no < WALL_FROM:
+        return False
+    weapons = [unit for unit in turn.ours if unit.kind in TOWER_TYPES]
+    if any(unit.level < 2 for unit in weapons):
+        return False
+    return True
 
 
 def _is_weapon_upgrade(name: str | None) -> bool:
@@ -285,10 +322,6 @@ def _try_weapon_upgrade_shop(
         name=want or "", round_no=turn.round_no,
     )
     return gold_left
-
-
-def _should_home(turn: World, role: Unit, memory) -> bool:
-    return _in_recall(turn)
 
 
 def _should_edge_mine(turn: World, role: Unit, memory) -> bool:
@@ -423,6 +456,8 @@ def _worker_job_valid(
         if job.target is None or job.target not in mines:
             return False
         if job.name and mines[job.target] != job.name:
+            return False
+        if not _can_return_from(turn, role, job.target):
             return False
         want = _wanted_item(turn, role, gold_left, memory)
         if _is_weapon_upgrade(want):
@@ -685,16 +720,21 @@ def _pioneer_day(
 ) -> tuple[str, str]:
     if _try_heal(role, commands):
         return "", _maybe_prompt(turn, memory)
-    if turn.phase_task:
-        _keep_job(memory, role, KIND_PHASE, round_no=turn.round_no)
-        return _run_task(turn, role, memory, claimed, commands)
     if _should_home(turn, role, memory):
+        if turn.phase_task:
+            execute_cmd, answer = next_task_command(turn, memory)
+            if answer:
+                commands[role.unit_id] = submit_answer_command(answer)
+                return execute_cmd, _maybe_prompt(turn, memory)
         _keep_job(
             memory, role, KIND_RECALL, target=_recall_target(turn),
             round_no=turn.round_no,
         )
         _recall_to_tower(turn, role, claimed, commands)
         return "", _maybe_prompt(turn, memory)
+    if turn.phase_task:
+        _keep_job(memory, role, KIND_PHASE, round_no=turn.round_no)
+        return _run_task(turn, role, memory, claimed, commands)
     if _try_accept_task(turn, role, claimed, commands, memory):
         return "", _maybe_prompt(turn, memory)
     if _try_treasure(turn, role, memory, claimed, commands):
@@ -915,7 +955,18 @@ def _fill_idle(turn: World, memory, commands: dict[int, dict[str, Any]]) -> None
             continue
         if any(distance(role.pos, tower.pos) <= 1 for tower in turn.weapons()):
             continue
-        if turn.is_day and role.kind == "pioneer" and _near_own_task(turn, role):
+        if turn.is_day and role.kind == "pioneer":
+            if _should_home(turn, role, memory):
+                _recall_to_tower(turn, role, claimed, commands)
+                continue
+            if _near_own_task(turn, role):
+                continue
+            cells = turn.own_task_zones() or tuple(task.pos for task in turn.player_tasks)
+            if cells:
+                target = min(cells, key=lambda pos: distance(role.pos, pos))
+                if _can_return_from(turn, role, target):
+                    _walk_to_task(turn, role, claimed, commands)
+                    continue
             continue
         _recall_to_tower(turn, role, claimed, commands)
 
@@ -1027,6 +1078,8 @@ def _try_shop(
     if turn.adjacent_to_zone(role, shop):
         commands[role.unit_id] = buy_command(want, 1)
         return True
+    if not _can_return_from(turn, role, shop):
+        return False
     urgent = want.lower() in {item.lower() for item in memory.treasure_items} or want.lower().endswith("voucher1")
     if urgent or gold_left >= 100:
         return _walk_adjacent(turn, role, shop, claimed, commands)
@@ -1034,18 +1087,26 @@ def _try_shop(
 
 
 def _wanted_item(turn: World, role: Unit, gold_left: int, memory) -> str | None:
-    for name in _weapon_voucher_wishlist(turn):
-        item = turn.shop_item(name)
-        if item is None or item.price > gold_left:
-            continue
-        if backpack_item(role, name):
-            continue
-        return name
+    if role.kind != "pioneer":
+        for name in _weapon_voucher_wishlist(turn):
+            item = turn.shop_item(name)
+            if item is None or item.price > gold_left:
+                continue
+            if backpack_item(role, name):
+                continue
+            return name
     if treasure_ready(turn, memory) or memory.treasure_items:
         for name in missing_treasure_items(role, memory.treasure_items):
             item = turn.shop_item(name)
             if item and item.price <= gold_left:
                 return item.name
+    if role.kind == "pioneer":
+        cap = HERO_MAX_HP.get(role.kind, 0)
+        if role.health < cap and backpack_item(role, "Medicine") is None:
+            item = turn.shop_item("Medicine")
+            if item and item.price <= gold_left:
+                return item.name
+        return None
     wishlist: list[str] = []
     if turn.station() and turn.station().level == 1:
         wishlist.append("StationUpgradeVoucher1")
@@ -1097,6 +1158,8 @@ def _try_accept_task(
         return True
     if turn.adjacent_to_zone(role, target) and not valid:
         return True
+    if not _can_return_from(turn, role, target):
+        return False
     walked = _walk_adjacent(turn, role, target, claimed, commands)
     return walked or turn.adjacent_to_zone(role, target) or lock is not None
 
@@ -1293,6 +1356,8 @@ def _mine(
     failed = turn.last_ok(role.unit_id) is False
     for pos, kind in ranked:
         if failed and distance(role.pos, pos) <= 1:
+            continue
+        if not turn.adjacent_to_zone(role, pos) and not _can_return_from(turn, role, pos):
             continue
         job = Job(kind=KIND_MINE, target=pos, name=kind)
         if _execute_mine(turn, role, job, claimed, commands):

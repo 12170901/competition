@@ -48,6 +48,12 @@ def place(
     return role
 
 
+def set_tower_levels(payload: dict[str, Any], level: int) -> None:
+    for role in payload["teamOur"]["roles"]:
+        if role.get("roleType") in TOWER_KINDS:
+            role["level"] = int(level)
+
+
 def drop_walls(payload: dict[str, Any]) -> None:
     payload["teamOur"]["roles"] = [
         role for role in payload["teamOur"]["roles"] if role.get("roleType") != "wall"
