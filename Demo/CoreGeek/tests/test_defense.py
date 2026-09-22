@@ -5,7 +5,7 @@
 本文件针对两项修复做回归:
   1. brain._wall_order / brain._tower_sites 优先朝向地图中央建防御;
      第一天只按左右朝向中心砌约 50% 围墙,远离中心的半圈留作出入口;
-  2. brain._worker_day 在墙未建齐时优先建墙,而非先卖矿/采矿。
+  2. brain._worker_day 在第 30 回合砌墙阶段、墙未建齐且无法升塔时优先建墙。
 """
 
 from __future__ import annotations
@@ -136,8 +136,8 @@ def test_tower_sites_faces_map_center(make_payload):
 
 
 def test_worker_builds_wall_when_towers_done(make_payload):
-    """人手分配:3 塔已建完、墙未建齐、工人紧邻墙位且带足 stone 时,直接建墙。"""
-    payload = make_payload(roundNo=1)
+    """人手分配:砌墙阶段 3 塔已建完、墙未建齐、工人紧邻墙位且带足 stone 时,直接建墙。"""
+    payload = make_payload(roundNo=35)
     payload = _strip_roles(payload)
     payload["teamOur"]["roles"] = [
         role for role in payload["teamOur"]["roles"] if role.get("roleType") != "wall"
@@ -190,8 +190,8 @@ def test_day1_worker_does_not_build_back_wall(make_payload):
 
 
 def test_worker_builds_wall_over_selling(make_payload):
-    """人手分配:墙未建齐、工人紧邻墙位且背包携 iron/copper 时,优先建墙而非卖矿。"""
-    payload = make_payload(roundNo=1)
+    """人手分配:砌墙阶段墙未建齐、工人紧邻墙位且背包携 iron/copper 时,优先建墙而非卖矿。"""
+    payload = make_payload(roundNo=35)
     payload = _strip_roles(payload)
     payload["teamOur"]["roles"] = [
         role for role in payload["teamOur"]["roles"] if role.get("roleType") != "wall"

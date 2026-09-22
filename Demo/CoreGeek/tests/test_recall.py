@@ -77,29 +77,24 @@ def test_late_day_builder_steps_closer_to_tower(make_payload):
     assert distance(step, tower) < before, (step, tower, before)
 
 
-def test_late_day_miner_goes_to_edge_not_tower(make_payload):
-    """回合 66:矿工不去塔,走向地图边缘的铜矿。"""
+def test_late_day_miner_also_recalls_to_tower(make_payload):
+    """回合 66:矿工也回塔,不再去地图边缘采矿。"""
     payload = fresh(make_payload(roundNo=66))
     fill_walls(payload)
-    start = Pos(16, 18)
+    start = Pos(20, 10)
     place(payload, WORKER_2, start.x, start.y, backpack=[])
     place(payload, WORKER_1, 8, 24, backpack=[])
     place(payload, PIONEER, 8, 25, backpack=["Medicine"])
     tower = nearest_tower(start, payload)
+    before = distance(start, tower)
     response = decide(payload)
     _validate(response, payload)
     action = action_of(response, WORKER_2)
-    assert action in {"move", "collect"}
-    if action == "collect":
-        target = response[str(WORKER_2)]["targetPos"][0]
-        assert (target["x"], target["y"]) == (EDGE_COPPER.x, EDGE_COPPER.y)
-    else:
-        step = move_pos(response, WORKER_2)
-        assert step is not None
-        assert distance(step, EDGE_COPPER) < distance(start, EDGE_COPPER)
-        assert distance(step, tower) >= distance(start, tower) or (
-            distance(step, EDGE_COPPER) < distance(start, EDGE_COPPER)
-        )
+    assert action not in {"collect", "sell", "buy"}, action
+    assert action == "move"
+    step = move_pos(response, WORKER_2)
+    assert step is not None
+    assert distance(step, tower) < before
 
 
 def test_late_day_pioneer_without_task_does_not_accept(make_payload):
@@ -157,8 +152,8 @@ def test_recall_does_not_emit_attack_in_day(make_payload):
     assert all(cmd["action"] != "attack" for cmd in response.values())
 
 
-def test_night_miner_collects_at_edge(make_payload):
-    """黑夜矿工贴着边缘铜矿应 collect,不得去操塔。"""
+def test_night_miner_mans_tower_not_edge(make_payload):
+    """黑夜矿工即使贴着边缘铜矿也要去操塔,不得 collect。"""
     payload = fresh(make_payload(roundNo=85, phaseTask=""))
     place(payload, WORKER_1, 8, 24, backpack=[], health=220)
     place(payload, WORKER_2, 8, 2, backpack=[], health=220)
@@ -177,13 +172,11 @@ def test_night_miner_collects_at_edge(make_payload):
     }
     response = decide(payload)
     _validate(response, payload)
-    assert action_of(response, WORKER_2) == "collect"
-    target = response[str(WORKER_2)]["targetPos"][0]
-    assert (target["x"], target["y"]) == (EDGE_COPPER.x, EDGE_COPPER.y)
+    assert action_of(response, WORKER_2) != "collect"
     gatling = response.get(str(GATLING))
     assert gatling is not None
     assert gatling["action"] == "attack"
     assert gatling["controllerId"] == str(WORKER_1)
-    for command in response.values():
-        if command["action"] == "attack":
-            assert command.get("controllerId") != str(WORKER_2)
+    miner = response.get(str(WORKER_2))
+    if miner is not None:
+        assert miner["action"] == "move"

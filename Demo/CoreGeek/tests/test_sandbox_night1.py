@@ -31,21 +31,21 @@ def _validate(response, payload):
             assert isinstance(command.get("controllerId"), str)
 
 
-def test_night1_decide_two_towers_fire_miner_collects():
-    """两人贴塔开火,矿工在边缘铜矿 collect。"""
+def test_night1_decide_three_towers_fire():
+    """三人贴塔时三座塔都开火,矿工不再去边缘采矿。"""
     turn = SandboxTurn(night1())
     response = turn.decide()
     _validate(response, turn.payload)
     attacks = {
         int(key): cmd for key, cmd in response.items() if cmd["action"] == "attack"
     }
-    assert len(attacks) == 2
-    assert set(attacks) <= {GATLING, RAILGUN, ROCKET}
+    assert len(attacks) == 3
+    assert set(attacks) == {GATLING, RAILGUN, ROCKET}
     controllers = {cmd["controllerId"] for cmd in attacks.values()}
-    assert controllers == {str(WORKER_1), str(PIONEER)}
+    assert controllers == {str(WORKER_1), str(PIONEER), str(WORKER_2)}
     miner = response.get(str(WORKER_2))
-    assert miner is not None
-    assert miner["action"] in {"collect", "move"}
+    if miner is not None:
+        assert miner["action"] != "collect"
 
 
 def test_night1_attack_hits_spawned_small_robots():
