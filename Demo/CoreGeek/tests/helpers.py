@@ -60,9 +60,11 @@ def drop_walls(payload: dict[str, Any]) -> None:
     ]
 
 
-def fill_walls(payload: dict[str, Any]) -> None:
+def fill_walls(payload: dict[str, Any], count: int | None = None) -> None:
     drop_walls(payload)
     order = _wall_order(World.load(payload))
+    if count is not None:
+        order = order[: max(0, count)]
     for index, cell in enumerate(order):
         payload["teamOur"]["roles"].append(
             {
