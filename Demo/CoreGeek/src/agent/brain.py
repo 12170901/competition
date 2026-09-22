@@ -185,7 +185,8 @@ def _worker_day(
 
     # 09:00 逻辑:两名工人都去建塔/走近塔,不按 builder/miner 拆开。
     # 优先建前两个塔位，第三个只有在前面两个都满了之后才建。
-    # 三塔齐后先采矿换钱、能升塔就升塔; 第 30 回合起砌墙,保证前两夜有墙。
+    # 三塔齐后:金币够先买升级券;包里有铜/铁先卖掉换金;第一天第 30 回合起砌墙。
+    # 第二天起若塔未满级且已有墙,先升塔不再扩墙。
     num_standing_towers = len(turn.weapons())
     if towers_missing and gold_left >= WEAPON_BUILD_COST and builds_left > 0:
         for index, site in enumerate(sites):
@@ -216,7 +217,19 @@ def _worker_day(
     )
     if shopped is not None:
         return shopped, builds_left
-    if walls_missing and _wall_phase(turn):
+    if (
+        walls_missing
+        and _should_wall_now(turn, walls_missing)
+        and _try_build_adjacent_wall(
+            turn, role, walls_missing, claimed, commands, memory,
+        )
+    ):
+        return gold_left, builds_left
+    if _try_sell_for_upgrade(
+        turn, role, claimed, commands, walls_missing, memory,
+    ):
+        return gold_left, builds_left
+    if walls_missing and _should_wall_now(turn, walls_missing):
         if _build_walls(turn, role, walls_missing, claimed, commands, memory):
             return gold_left, builds_left
 
@@ -277,8 +290,24 @@ def _should_home(turn: World, role: Unit, memory) -> bool:
 
 
 def _wall_phase(turn: World) -> bool:
-    """前 29 回合建塔/采矿/升塔/做任务; 第 30 回合起必须砌墙,否则前两夜守不住。"""
+    """前 29 回合建塔/采矿/升塔/做任务; 第 30 回合起才进入砌墙窗口。"""
     return turn.round_no >= WALL_FROM
+
+
+def _towers_need_upgrade(turn: World) -> bool:
+    weapons = [unit for unit in turn.ours if unit.kind in TOWER_TYPES]
+    return any(unit.level < 3 for unit in weapons)
+
+
+def _should_wall_now(turn: World, walls_missing: list[Pos]) -> bool:
+    """第一天第 30 回合起必须砌墙保前两夜; 第二天起塔未满级且已有墙则先升塔。"""
+    if not walls_missing or not _wall_phase(turn):
+        return False
+    if turn.day_index <= 1:
+        return True
+    if not turn.walls():
+        return True
+    return not _towers_need_upgrade(turn)
 
 
 def _is_weapon_upgrade(name: str | None) -> bool:
@@ -459,14 +488,14 @@ def _worker_job_valid(
             return False
         if (
             walls_missing
-            and _wall_phase(turn)
+            and _should_wall_now(turn, walls_missing)
             and is_builder(memory, role.unit_id)
             and mines[job.target] != WALL_MATERIAL
         ):
             return False
         return True
     if job.kind == KIND_WALL:
-        if not walls_missing or not _wall_phase(turn):
+        if not walls_missing or not _should_wall_now(turn, walls_missing):
             return False
         want = _wanted_item(turn, role, gold_left, memory)
         if _is_weapon_upgrade(want):
@@ -485,7 +514,7 @@ def _worker_job_valid(
             return item is not None and item.price <= gold_left
         return _wanted_item(turn, role, gold_left, memory) is not None
     if job.kind == KIND_SELL:
-        keep = 1 if walls_missing and _wall_phase(turn) else 0
+        keep = 1 if walls_missing and _should_wall_now(turn, walls_missing) else 0
         return turn.vendor() is not None and _sellable_ore(role, turn, keep) is not None
     if job.kind == KIND_RECALL:
         return _should_home(turn, role, memory)
@@ -557,7 +586,10 @@ def _pick_worker_job(
             name=want, round_no=turn.round_no,
         )
         return gold_left, builds_left
-    if _try_sell(turn, role, claimed, commands, walls_missing):
+    if _try_sell(
+        turn, role, claimed, commands, walls_missing,
+        force_metal=_towers_need_upgrade(turn),
+    ):
         _keep_job(
             memory, role, KIND_SELL, target=turn.vendor(),
             round_no=turn.round_no,
@@ -704,6 +736,54 @@ def _build_walls(
             return True
         return _walk_adjacent(turn, role, stone, claimed, commands)
     return False
+
+
+def _try_build_adjacent_wall(
+    turn: World,
+    role: Unit,
+    walls_missing: list[Pos],
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+    memory=None,
+) -> bool:
+    """人已经站在墙位旁且包里有石头:这一回合先砌上,不要为了卖铜走开。"""
+    if not count_item(role, WALL_MATERIAL):
+        return False
+    for site in list(walls_missing):
+        if site in claimed or role.pos == site or distance(role.pos, site) > 1:
+            continue
+        commands[role.unit_id] = build_command(site, WALL)
+        claimed.add(site)
+        walls_missing.remove(site)
+        if memory is not None:
+            _keep_job(
+                memory, role, KIND_WALL, target=site,
+                name=WALL, round_no=turn.round_no,
+            )
+        return True
+    return False
+
+
+def _try_sell_for_upgrade(
+    turn: World,
+    role: Unit,
+    claimed: set[Pos],
+    commands: dict[int, dict[str, Any]],
+    walls_missing: list[Pos],
+    memory,
+) -> bool:
+    """塔未满级且包里有铜/铁:去小贩卖掉换升塔金,不等攒满 8 个。"""
+    if not _towers_need_upgrade(turn):
+        return False
+    if not _try_sell(
+        turn, role, claimed, commands, walls_missing, force_metal=True,
+    ):
+        return False
+    _keep_job(
+        memory, role, KIND_SELL, target=turn.vendor(),
+        round_no=turn.round_no,
+    )
+    return True
 
 
 def _pioneer_day(
@@ -1039,19 +1119,25 @@ def _try_sell(
     claimed: set[Pos],
     commands: dict[int, dict[str, Any]],
     walls_missing: list[Pos],
+    force_metal: bool = False,
 ) -> bool:
     vendor = turn.vendor()
     if vendor is None:
         return False
-    keep_stone = 1 if walls_missing and _wall_phase(turn) else 0
-    ore = _sellable_ore(role, turn, keep_stone)
+    keep_stone = 1 if walls_missing and _should_wall_now(turn, walls_missing) else 0
+    if force_metal:
+        ore = _sellable_metal(role, turn)
+    else:
+        ore = _sellable_ore(role, turn, keep_stone)
     if ore is None:
         return False
     if turn.adjacent_to_zone(role, vendor):
         name, num = ore
         commands[role.unit_id] = sell_command(name, num)
         return True
-    if role.backpack_full or num_ores(role) >= SELL_THRESHOLD:
+    if not _can_return_from(turn, role, vendor):
+        return False
+    if force_metal or role.backpack_full or num_ores(role) >= SELL_THRESHOLD:
         return _walk_adjacent(turn, role, vendor, claimed, commands)
     return False
 
@@ -1298,7 +1384,7 @@ def _execute_sell(
     walls_missing: list[Pos],
 ) -> bool:
     vendor = turn.vendor()
-    keep_stone = 1 if walls_missing and _wall_phase(turn) else 0
+    keep_stone = 1 if walls_missing and _should_wall_now(turn, walls_missing) else 0
     ore = _sellable_ore(role, turn, keep_stone)
     if vendor is None or ore is None:
         return False
@@ -1612,6 +1698,23 @@ def _sellable_ore(
         price = turn.vendor_price(name)
         score = (price, have)
         if best is None or score > (best[0], best[2]):
+            best = (price, actual, have)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def _sellable_metal(role: Unit, turn: World) -> tuple[str, int] | None:
+    best: tuple[int, str, int] | None = None
+    for name in ("copper", "iron"):
+        have = count_item(role, name)
+        if have <= 0:
+            continue
+        actual = backpack_item(role, name)
+        if actual is None:
+            continue
+        price = turn.vendor_price(name)
+        if best is None or price > best[0]:
             best = (price, actual, have)
     if best is None:
         return None
