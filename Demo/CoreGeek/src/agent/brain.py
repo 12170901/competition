@@ -185,7 +185,7 @@ def _worker_day(
 
     # 09:00 逻辑:两名工人都去建塔/走近塔,不按 builder/miner 拆开。
     # 优先建前两个塔位，第三个只有在前面两个都满了之后才建。
-    # 三塔齐后先采矿换钱、能升塔就升塔; 全局第 30 回合起才砌墙。
+    # 三塔齐后先采矿换钱、能升塔就升塔; 第 30 回合起砌墙,保证前两夜有墙。
     num_standing_towers = len(turn.weapons())
     if towers_missing and gold_left >= WEAPON_BUILD_COST and builds_left > 0:
         for index, site in enumerate(sites):
@@ -277,13 +277,8 @@ def _should_home(turn: World, role: Unit, memory) -> bool:
 
 
 def _wall_phase(turn: World) -> bool:
-    """塔还是 1 级时继续攒钱升塔; 全部至少 2 级且过了第 30 回合才砌墙。"""
-    if turn.round_no < WALL_FROM:
-        return False
-    weapons = [unit for unit in turn.ours if unit.kind in TOWER_TYPES]
-    if any(unit.level < 2 for unit in weapons):
-        return False
-    return True
+    """前 29 回合建塔/采矿/升塔/做任务; 第 30 回合起必须砌墙,否则前两夜守不住。"""
+    return turn.round_no >= WALL_FROM
 
 
 def _is_weapon_upgrade(name: str | None) -> bool:
