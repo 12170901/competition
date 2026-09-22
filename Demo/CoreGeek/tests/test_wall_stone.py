@@ -11,7 +11,6 @@ from tests.helpers import (
     drop_walls,
     fill_walls,
     fresh,
-    set_tower_levels,
     move_pos,
     park_other_worker_building,
     place,
@@ -37,7 +36,6 @@ def test_missing_walls_collect_stone_not_copper(make_payload):
     """砌墙阶段(回合 35)墙未齐:贴着铜矿的工人不得 collect 铜。"""
     payload = fresh(make_payload(roundNo=35))
     drop_walls(payload)
-    set_tower_levels(payload, 2)
     park_other_worker_building(payload)
     start = Pos(8, 2)
     place(payload, WORKER_1, start.x, start.y, backpack=[])
@@ -60,7 +58,6 @@ def test_missing_walls_walk_to_nearest_stone_mine(make_payload):
     """砌墙阶段墙未齐、不贴任何矿:应走向最近石矿,而不是更近的铜/铁。"""
     payload = fresh(make_payload(roundNo=35))
     drop_walls(payload)
-    set_tower_levels(payload, 2)
     park_other_worker_building(payload)
     start = Pos(20, 15)
     place(payload, WORKER_1, start.x, start.y, backpack=[])
@@ -76,7 +73,6 @@ def test_has_stone_builds_instead_of_more_ore(make_payload):
     """砌墙阶段墙未齐且工人紧邻墙位、包里有石头:直接建墙。"""
     payload = fresh(make_payload(roundNo=35))
     drop_walls(payload)
-    set_tower_levels(payload, 2)
     place(payload, WORKER_1, 12, 21, backpack=["stone", "stone", "stone", "stone"])
     place(payload, PIONEER, 8, 24, backpack=["Medicine"])
     response = decide(payload)
