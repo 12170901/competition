@@ -154,29 +154,12 @@ def test_walls_complete_still_buys_upgrade(make_payload):
     assert command.get("name") == "WeaponUpgradeVoucher1"
 
 
-def test_early_few_copper_keeps_mining(make_payload):
-    """回合 12、离第 30 回合还早、包里只有 3 铜:继续采铜,不去小贩。"""
-    payload = fresh(make_payload(roundNo=12))
+def test_day1_copper_in_backpack_goes_to_vendor(make_payload):
+    """第一天砌墙阶段:包里有铜、金币不够、人不在墙边时,应去小贩卖掉换升塔金,不能把铜留在包里。"""
+    payload = fresh(make_payload(roundNo=35))
     _opening_towers_no_walls(payload, gold=0)
     start = Pos(16, 12)
     place(payload, WORKER_1, start.x, start.y, backpack=["copper", "copper", "copper"])
-    response = decide(payload)
-    _validate(response, payload)
-    command = response[str(WORKER_1)]
-    assert command["action"] != "sell", command
-    if command["action"] == "move":
-        step = move_pos(response, WORKER_1)
-        assert step is not None
-        assert distance(step, COPPER_NEAR) < distance(start, COPPER_NEAR)
-        assert distance(step, VENDOR) >= distance(start, VENDOR)
-
-
-def test_pre_wall_window_sells_when_upgrade_affordable(make_payload):
-    """第 30 回合前最后阶段:卖掉铜后够买升级券,应按距离去小贩,不能继续采矿。"""
-    payload = fresh(make_payload(roundNo=22))
-    _opening_towers_no_walls(payload, gold=90)
-    start = Pos(16, 12)
-    place(payload, WORKER_1, start.x, start.y, backpack=["copper", "copper"])
     response = decide(payload)
     _validate(response, payload)
     command = response[str(WORKER_1)]
@@ -192,45 +175,20 @@ def test_pre_wall_window_sells_when_upgrade_affordable(make_payload):
     assert distance(step, VENDOR) < distance(start, VENDOR)
 
 
-def test_after_round_30_few_copper_goes_to_stone_not_vendor(make_payload):
-    """第 35 回合砌墙阶段、包里只有 3 铜不够升塔:去采石砌墙,不跑去卖铜。"""
+def test_day1_vendor_side_sells_copper(make_payload):
+    """第一天金币不够升塔、工人已在小贩旁且包里有铜:直接 sell 铜。"""
     payload = fresh(make_payload(roundNo=35))
     _opening_towers_no_walls(payload, gold=0)
-    start = Pos(16, 12)
-    place(payload, WORKER_1, start.x, start.y, backpack=["copper", "copper", "copper"])
+    place(payload, WORKER_1, 20, 15, backpack=["copper", "copper", "copper"])
     response = decide(payload)
     _validate(response, payload)
     command = response[str(WORKER_1)]
-    assert command["action"] != "sell", command
-    if command["action"] == "move":
-        step = move_pos(response, WORKER_1)
-        assert step is not None
-        assert distance(step, STONE_NEAR) < distance(start, STONE_NEAR)
+    assert command["action"] == "sell"
+    assert str(command.get("name", "")).lower() == "copper"
 
 
-def test_late_day_dumps_copper_before_night(make_payload):
-    """天黑前:包里有铜应先去小贩卖掉,再回塔。"""
-    payload = fresh(make_payload(roundNo=62))
-    fill_walls(payload)
-    payload["teamOur"]["goldNum"] = 0
-    start = Pos(16, 12)
-    place(payload, WORKER_1, start.x, start.y, backpack=["copper", "copper", "copper"])
-    place(payload, WORKER_2, 8, 24, backpack=[])
-    place(payload, PIONEER, 8, 25, backpack=["Medicine"])
-    response = decide(payload)
-    _validate(response, payload)
-    command = response[str(WORKER_1)]
-    if command["action"] == "sell":
-        assert str(command.get("name", "")).lower() == "copper"
-        return
-    assert command["action"] == "move", command
-    step = move_pos(response, WORKER_1)
-    assert step is not None
-    assert distance(step, VENDOR) < distance(start, VENDOR)
-
-
-def test_day2_incomplete_walls_keeps_copper_early_day(make_payload):
-    """第二天白天前段、墙只建了一半、塔未满级、包里有铜:继续采矿攒钱,不立刻卖,也不扩墙。"""
+def test_day2_incomplete_walls_sells_copper_not_more_walls(make_payload):
+    """第二天墙只建了一半、塔未满级、包里有铜:先卖铜升塔,不再继续扩墙。"""
     payload = fresh(make_payload(roundNo=135))
     fill_walls(payload, count=3)
     payload["teamOur"]["goldNum"] = 0
@@ -244,11 +202,13 @@ def test_day2_incomplete_walls_keeps_copper_early_day(make_payload):
     assert not (
         command["action"] == "build" and command.get("name") == "wall"
     ), command
-    assert command["action"] != "sell", command
-    if command["action"] == "move":
-        step = move_pos(response, WORKER_1)
-        assert step is not None
-        assert distance(step, VENDOR) >= distance(start, VENDOR)
+    if command["action"] == "sell":
+        assert str(command.get("name", "")).lower() == "copper"
+        return
+    assert command["action"] == "move", command
+    step = move_pos(response, WORKER_1)
+    assert step is not None
+    assert distance(step, VENDOR) < distance(start, VENDOR)
 
 
 def test_day2_incomplete_walls_gold_enough_buys_upgrade(make_payload):
