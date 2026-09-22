@@ -59,11 +59,10 @@ from .tasks import (
 )
 from .world import HERO_MAX_HP, World, backpack_item, count_item
 
-TOWER_LOADOUT = ("rocket", "railgun", "gatling")
+TOWER_LOADOUT = ("rocket", "rocket", "rocket")
 STONE_KEEP = 4
 RECALL_ROUNDS = 5
 RECALL_FROM = DAY_ROUNDS - RECALL_ROUNDS + 1
-RECALL_SLACK = 4
 WALL_FROM = 30
 EDGE_MINE_MAX = 4
 _NEIGHBOUR_STEPS = (
@@ -185,8 +184,7 @@ def _worker_day(
 
     # 09:00 逻辑:两名工人都去建塔/走近塔,不按 builder/miner 拆开。
     # 优先建前两个塔位，第三个只有在前面两个都满了之后才建。
-    # 三塔齐后:金币够先买升级券;包里有铜/铁先卖掉换金;第一天第 30 回合起砌墙。
-    # 第二天起若塔未满级且已有墙,先升塔不再扩墙。
+    # 三塔齐后先采矿换钱、能升塔就升塔; 全局第 30 回合起才砌墙。
     num_standing_towers = len(turn.weapons())
     if towers_missing and gold_left >= WEAPON_BUILD_COST and builds_left > 0:
         for index, site in enumerate(sites):
@@ -217,19 +215,7 @@ def _worker_day(
     )
     if shopped is not None:
         return shopped, builds_left
-    if (
-        walls_missing
-        and _should_wall_now(turn, walls_missing)
-        and _try_build_adjacent_wall(
-            turn, role, walls_missing, claimed, commands, memory,
-        )
-    ):
-        return gold_left, builds_left
-    if _try_sell_for_upgrade(
-        turn, role, claimed, commands, walls_missing, memory,
-    ):
-        return gold_left, builds_left
-    if walls_missing and _should_wall_now(turn, walls_missing):
+    if walls_missing and _wall_phase(turn):
         if _build_walls(turn, role, walls_missing, claimed, commands, memory):
             return gold_left, builds_left
 
@@ -258,56 +244,9 @@ def _in_recall(turn: World) -> bool:
     return bool(turn.is_day) and turn.round_in_day >= RECALL_FROM
 
 
-def _recall_slack(turn: World) -> int:
-    """切比雪夫低估绕路; 天数越高夜间兵越多,多留几回合。"""
-    return RECALL_SLACK + 2 + max(0, turn.day_index - 1)
-
-
-def _travel_home(turn: World, pos: Pos) -> int:
-    target = _recall_target(turn)
-    if target is None:
-        return 0
-    return distance(pos, target)
-
-
-def _can_return_from(turn: World, role: Unit, dest: Pos) -> bool:
-    if not turn.is_day:
-        return True
-    slack = _recall_slack(turn)
-    home = _recall_target(turn) or dest
-    go = distance(role.pos, dest)
-    back = distance(dest, home)
-    return turn.round_in_day + go + back + slack < DAY_ROUNDS
-
-
-def _should_home(turn: World, role: Unit, memory) -> bool:
-    if not turn.is_day:
-        return False
-    if _in_recall(turn):
-        return True
-    travel = _travel_home(turn, role.pos)
-    return turn.round_in_day + travel + _recall_slack(turn) >= DAY_ROUNDS
-
-
 def _wall_phase(turn: World) -> bool:
-    """前 29 回合建塔/采矿/升塔/做任务; 第 30 回合起才进入砌墙窗口。"""
+    """开局前 29 回合只建塔/经营; 第 30 回合起才进入砌墙阶段。"""
     return turn.round_no >= WALL_FROM
-
-
-def _towers_need_upgrade(turn: World) -> bool:
-    weapons = [unit for unit in turn.ours if unit.kind in TOWER_TYPES]
-    return any(unit.level < 3 for unit in weapons)
-
-
-def _should_wall_now(turn: World, walls_missing: list[Pos]) -> bool:
-    """第一天第 30 回合起必须砌墙保前两夜; 第二天起塔未满级且已有墙则先升塔。"""
-    if not walls_missing or not _wall_phase(turn):
-        return False
-    if turn.day_index <= 1:
-        return True
-    if not turn.walls():
-        return True
-    return not _towers_need_upgrade(turn)
 
 
 def _is_weapon_upgrade(name: str | None) -> bool:
@@ -346,6 +285,10 @@ def _try_weapon_upgrade_shop(
         name=want or "", round_no=turn.round_no,
     )
     return gold_left
+
+
+def _should_home(turn: World, role: Unit, memory) -> bool:
+    return _in_recall(turn)
 
 
 def _should_edge_mine(turn: World, role: Unit, memory) -> bool:
@@ -481,21 +424,19 @@ def _worker_job_valid(
             return False
         if job.name and mines[job.target] != job.name:
             return False
-        if not _can_return_from(turn, role, job.target):
-            return False
         want = _wanted_item(turn, role, gold_left, memory)
         if _is_weapon_upgrade(want):
             return False
         if (
             walls_missing
-            and _should_wall_now(turn, walls_missing)
+            and _wall_phase(turn)
             and is_builder(memory, role.unit_id)
             and mines[job.target] != WALL_MATERIAL
         ):
             return False
         return True
     if job.kind == KIND_WALL:
-        if not walls_missing or not _should_wall_now(turn, walls_missing):
+        if not walls_missing or not _wall_phase(turn):
             return False
         want = _wanted_item(turn, role, gold_left, memory)
         if _is_weapon_upgrade(want):
@@ -514,7 +455,7 @@ def _worker_job_valid(
             return item is not None and item.price <= gold_left
         return _wanted_item(turn, role, gold_left, memory) is not None
     if job.kind == KIND_SELL:
-        keep = 1 if walls_missing and _should_wall_now(turn, walls_missing) else 0
+        keep = 1 if walls_missing and _wall_phase(turn) else 0
         return turn.vendor() is not None and _sellable_ore(role, turn, keep) is not None
     if job.kind == KIND_RECALL:
         return _should_home(turn, role, memory)
@@ -586,10 +527,7 @@ def _pick_worker_job(
             name=want, round_no=turn.round_no,
         )
         return gold_left, builds_left
-    if _try_sell(
-        turn, role, claimed, commands, walls_missing,
-        force_metal=_towers_need_upgrade(turn),
-    ):
+    if _try_sell(turn, role, claimed, commands, walls_missing):
         _keep_job(
             memory, role, KIND_SELL, target=turn.vendor(),
             round_no=turn.round_no,
@@ -738,54 +676,6 @@ def _build_walls(
     return False
 
 
-def _try_build_adjacent_wall(
-    turn: World,
-    role: Unit,
-    walls_missing: list[Pos],
-    claimed: set[Pos],
-    commands: dict[int, dict[str, Any]],
-    memory=None,
-) -> bool:
-    """人已经站在墙位旁且包里有石头:这一回合先砌上,不要为了卖铜走开。"""
-    if not count_item(role, WALL_MATERIAL):
-        return False
-    for site in list(walls_missing):
-        if site in claimed or role.pos == site or distance(role.pos, site) > 1:
-            continue
-        commands[role.unit_id] = build_command(site, WALL)
-        claimed.add(site)
-        walls_missing.remove(site)
-        if memory is not None:
-            _keep_job(
-                memory, role, KIND_WALL, target=site,
-                name=WALL, round_no=turn.round_no,
-            )
-        return True
-    return False
-
-
-def _try_sell_for_upgrade(
-    turn: World,
-    role: Unit,
-    claimed: set[Pos],
-    commands: dict[int, dict[str, Any]],
-    walls_missing: list[Pos],
-    memory,
-) -> bool:
-    """塔未满级且包里有铜/铁:去小贩卖掉换升塔金,不等攒满 8 个。"""
-    if not _towers_need_upgrade(turn):
-        return False
-    if not _try_sell(
-        turn, role, claimed, commands, walls_missing, force_metal=True,
-    ):
-        return False
-    _keep_job(
-        memory, role, KIND_SELL, target=turn.vendor(),
-        round_no=turn.round_no,
-    )
-    return True
-
-
 def _pioneer_day(
     turn: World,
     role: Unit,
@@ -795,21 +685,16 @@ def _pioneer_day(
 ) -> tuple[str, str]:
     if _try_heal(role, commands):
         return "", _maybe_prompt(turn, memory)
+    if turn.phase_task:
+        _keep_job(memory, role, KIND_PHASE, round_no=turn.round_no)
+        return _run_task(turn, role, memory, claimed, commands)
     if _should_home(turn, role, memory):
-        if turn.phase_task:
-            execute_cmd, answer = next_task_command(turn, memory)
-            if answer:
-                commands[role.unit_id] = submit_answer_command(answer)
-                return execute_cmd, _maybe_prompt(turn, memory)
         _keep_job(
             memory, role, KIND_RECALL, target=_recall_target(turn),
             round_no=turn.round_no,
         )
         _recall_to_tower(turn, role, claimed, commands)
         return "", _maybe_prompt(turn, memory)
-    if turn.phase_task:
-        _keep_job(memory, role, KIND_PHASE, round_no=turn.round_no)
-        return _run_task(turn, role, memory, claimed, commands)
     if _try_accept_task(turn, role, claimed, commands, memory):
         return "", _maybe_prompt(turn, memory)
     if _try_treasure(turn, role, memory, claimed, commands):
@@ -1030,18 +915,7 @@ def _fill_idle(turn: World, memory, commands: dict[int, dict[str, Any]]) -> None
             continue
         if any(distance(role.pos, tower.pos) <= 1 for tower in turn.weapons()):
             continue
-        if turn.is_day and role.kind == "pioneer":
-            if _should_home(turn, role, memory):
-                _recall_to_tower(turn, role, claimed, commands)
-                continue
-            if _near_own_task(turn, role):
-                continue
-            cells = turn.own_task_zones() or tuple(task.pos for task in turn.player_tasks)
-            if cells:
-                target = min(cells, key=lambda pos: distance(role.pos, pos))
-                if _can_return_from(turn, role, target):
-                    _walk_to_task(turn, role, claimed, commands)
-                    continue
+        if turn.is_day and role.kind == "pioneer" and _near_own_task(turn, role):
             continue
         _recall_to_tower(turn, role, claimed, commands)
 
@@ -1119,25 +993,19 @@ def _try_sell(
     claimed: set[Pos],
     commands: dict[int, dict[str, Any]],
     walls_missing: list[Pos],
-    force_metal: bool = False,
 ) -> bool:
     vendor = turn.vendor()
     if vendor is None:
         return False
-    keep_stone = 1 if walls_missing and _should_wall_now(turn, walls_missing) else 0
-    if force_metal:
-        ore = _sellable_metal(role, turn)
-    else:
-        ore = _sellable_ore(role, turn, keep_stone)
+    keep_stone = 1 if walls_missing and _wall_phase(turn) else 0
+    ore = _sellable_ore(role, turn, keep_stone)
     if ore is None:
         return False
     if turn.adjacent_to_zone(role, vendor):
         name, num = ore
         commands[role.unit_id] = sell_command(name, num)
         return True
-    if not _can_return_from(turn, role, vendor):
-        return False
-    if force_metal or role.backpack_full or num_ores(role) >= SELL_THRESHOLD:
+    if role.backpack_full or num_ores(role) >= SELL_THRESHOLD:
         return _walk_adjacent(turn, role, vendor, claimed, commands)
     return False
 
@@ -1159,8 +1027,6 @@ def _try_shop(
     if turn.adjacent_to_zone(role, shop):
         commands[role.unit_id] = buy_command(want, 1)
         return True
-    if not _can_return_from(turn, role, shop):
-        return False
     urgent = want.lower() in {item.lower() for item in memory.treasure_items} or want.lower().endswith("voucher1")
     if urgent or gold_left >= 100:
         return _walk_adjacent(turn, role, shop, claimed, commands)
@@ -1168,26 +1034,18 @@ def _try_shop(
 
 
 def _wanted_item(turn: World, role: Unit, gold_left: int, memory) -> str | None:
-    if role.kind != "pioneer":
-        for name in _weapon_voucher_wishlist(turn):
-            item = turn.shop_item(name)
-            if item is None or item.price > gold_left:
-                continue
-            if backpack_item(role, name):
-                continue
-            return name
+    for name in _weapon_voucher_wishlist(turn):
+        item = turn.shop_item(name)
+        if item is None or item.price > gold_left:
+            continue
+        if backpack_item(role, name):
+            continue
+        return name
     if treasure_ready(turn, memory) or memory.treasure_items:
         for name in missing_treasure_items(role, memory.treasure_items):
             item = turn.shop_item(name)
             if item and item.price <= gold_left:
                 return item.name
-    if role.kind == "pioneer":
-        cap = HERO_MAX_HP.get(role.kind, 0)
-        if role.health < cap and backpack_item(role, "Medicine") is None:
-            item = turn.shop_item("Medicine")
-            if item and item.price <= gold_left:
-                return item.name
-        return None
     wishlist: list[str] = []
     if turn.station() and turn.station().level == 1:
         wishlist.append("StationUpgradeVoucher1")
@@ -1239,8 +1097,6 @@ def _try_accept_task(
         return True
     if turn.adjacent_to_zone(role, target) and not valid:
         return True
-    if not _can_return_from(turn, role, target):
-        return False
     walked = _walk_adjacent(turn, role, target, claimed, commands)
     return walked or turn.adjacent_to_zone(role, target) or lock is not None
 
@@ -1384,7 +1240,7 @@ def _execute_sell(
     walls_missing: list[Pos],
 ) -> bool:
     vendor = turn.vendor()
-    keep_stone = 1 if walls_missing and _should_wall_now(turn, walls_missing) else 0
+    keep_stone = 1 if walls_missing and _wall_phase(turn) else 0
     ore = _sellable_ore(role, turn, keep_stone)
     if vendor is None or ore is None:
         return False
@@ -1437,8 +1293,6 @@ def _mine(
     failed = turn.last_ok(role.unit_id) is False
     for pos, kind in ranked:
         if failed and distance(role.pos, pos) <= 1:
-            continue
-        if not turn.adjacent_to_zone(role, pos) and not _can_return_from(turn, role, pos):
             continue
         job = Job(kind=KIND_MINE, target=pos, name=kind)
         if _execute_mine(turn, role, job, claimed, commands):
@@ -1698,23 +1552,6 @@ def _sellable_ore(
         price = turn.vendor_price(name)
         score = (price, have)
         if best is None or score > (best[0], best[2]):
-            best = (price, actual, have)
-    if best is None:
-        return None
-    return best[1], best[2]
-
-
-def _sellable_metal(role: Unit, turn: World) -> tuple[str, int] | None:
-    best: tuple[int, str, int] | None = None
-    for name in ("copper", "iron"):
-        have = count_item(role, name)
-        if have <= 0:
-            continue
-        actual = backpack_item(role, name)
-        if actual is None:
-            continue
-        price = turn.vendor_price(name)
-        if best is None or price > best[0]:
             best = (price, actual, have)
     if best is None:
         return None

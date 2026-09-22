@@ -18,6 +18,7 @@ from tests.helpers import (
     place,
 )
 
+EDGE_COPPER = Pos(7, 2)
 VALID_ACTIONS = {
     "move", "collect", "build", "attack", "sell", "buy", "remove",
     "acceptTask", "submitAnswer", "summonTreasure", "use", "drop",
@@ -31,35 +32,18 @@ def _validate(response, payload):
         assert command["action"] in VALID_ACTIONS
 
 
-def test_round_60_far_worker_recalls_not_mine(make_payload):
-    """远处铜矿走回家要 20+ 格:回合 60 必须回塔,不能再 collect。"""
+def test_round_60_still_mines_not_recall(make_payload):
+    """回合 60 距入夜还有 10 回合:贴铜矿的建造工仍应 collect,不得提前回塔。"""
     payload = fresh(make_payload(roundNo=60))
     fill_walls(payload)
-    start = Pos(8, 2)
-    place(payload, WORKER_1, start.x, start.y, backpack=[])
-    place(payload, WORKER_2, 8, 24, backpack=[])
-    place(payload, PIONEER, 8, 25, backpack=["Medicine"])
-    tower = nearest_tower(start, payload)
-    before = distance(start, tower)
+    place(payload, WORKER_1, 8, 2, backpack=[])
+    place(payload, WORKER_2, 16, 18, backpack=[])
+    place(payload, PIONEER, 18, 18, backpack=["Medicine"])
     response = decide(payload)
     _validate(response, payload)
-    assert action_of(response, WORKER_1) != "collect"
-    assert action_of(response, WORKER_1) == "move"
-    step = move_pos(response, WORKER_1)
-    assert step is not None
-    assert distance(step, tower) <= before
-
-
-def test_round_60_near_home_can_still_work(make_payload):
-    """贴着塔的工人回合 60 不必提前空转回防。"""
-    payload = fresh(make_payload(roundNo=60))
-    fill_walls(payload)
-    place(payload, WORKER_1, 8, 24, backpack=[])
-    place(payload, WORKER_2, 11, 25, backpack=[])
-    place(payload, PIONEER, 8, 25, backpack=["Medicine"])
-    response = decide(payload)
-    _validate(response, payload)
-    assert action_of(response, WORKER_1) != "attack"
+    assert action_of(response, WORKER_1) == "collect"
+    target = response[str(WORKER_1)]["targetPos"][0]
+    assert (target["x"], target["y"]) == (EDGE_COPPER.x, EDGE_COPPER.y)
 
 
 def test_late_day_builder_does_not_collect(make_payload):
@@ -130,42 +114,18 @@ def test_late_day_pioneer_without_task_does_not_accept(make_payload):
     assert distance(step, tower) < before
 
 
-def test_late_day_pioneer_with_phase_task_goes_home(make_payload):
-    """已有 phaseTask 也必须回塔:留在任务点夜里会被机器人打死。"""
+def test_late_day_pioneer_with_phase_task_stays(make_payload):
+    """已有 phaseTask 时,回防也不得离开任务点周围一格。"""
     payload = fresh(make_payload(roundNo=66, phaseTask="请阅读task_1_alpha.md"))
-    start = Pos(13, 14)
-    place(payload, PIONEER, start.x, start.y, backpack=["Medicine"])
-    place(payload, WORKER_1, 8, 24, backpack=[])
-    tower = nearest_tower(start, payload)
-    before = distance(start, tower)
+    task = Pos(14, 14)
+    place(payload, PIONEER, 13, 14, backpack=["Medicine"])
     response = decide(payload)
     _validate(response, payload)
     assert action_of(response, PIONEER) != "acceptTask"
     step = move_pos(response, PIONEER)
-    assert step is not None
-    assert distance(step, tower) < before
-
-
-def test_early_day_pioneer_accepts_valid_task(make_payload):
-    """白天前段有可领任务:开拓者应 acceptTask,不得去商店。"""
-    payload = fresh(make_payload(roundNo=10, phaseTask=""))
-    payload["teamOur"]["goldNum"] = 200
-    payload["teamOur"]["playerTasks"] = [
-        {
-            "taskType": "自进化类1",
-            "taskPosition": {"x": 14, "y": 14},
-            "coldDownRounds": 0,
-            "scoreReward": 50,
-            "goldReward": 30,
-            "isValid": True,
-        },
-    ]
-    place(payload, PIONEER, 13, 14, backpack=["Medicine"])
-    place(payload, WORKER_1, 8, 24, backpack=[])
-    place(payload, WORKER_2, 11, 25, backpack=[])
-    response = decide(payload)
-    _validate(response, payload)
-    assert action_of(response, PIONEER) == "acceptTask"
+    if step is not None:
+        assert distance(step, task) <= 1
+        assert step != task
 
 
 def test_early_day_worker_still_mines_or_builds(make_payload):

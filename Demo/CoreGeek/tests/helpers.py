@@ -48,23 +48,15 @@ def place(
     return role
 
 
-def set_tower_levels(payload: dict[str, Any], level: int) -> None:
-    for role in payload["teamOur"]["roles"]:
-        if role.get("roleType") in TOWER_KINDS:
-            role["level"] = int(level)
-
-
 def drop_walls(payload: dict[str, Any]) -> None:
     payload["teamOur"]["roles"] = [
         role for role in payload["teamOur"]["roles"] if role.get("roleType") != "wall"
     ]
 
 
-def fill_walls(payload: dict[str, Any], count: int | None = None) -> None:
+def fill_walls(payload: dict[str, Any]) -> None:
     drop_walls(payload)
     order = _wall_order(World.load(payload))
-    if count is not None:
-        order = order[: max(0, count)]
     for index, cell in enumerate(order):
         payload["teamOur"]["roles"].append(
             {
