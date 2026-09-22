@@ -65,6 +65,7 @@ RECALL_ROUNDS = 5
 RECALL_FROM = DAY_ROUNDS - RECALL_ROUNDS + 1
 RECALL_SLACK = 4
 WALL_FROM = 30
+CASHOUT_SLACK = 2
 EDGE_MINE_MAX = 4
 _NEIGHBOUR_STEPS = (
     (-1, -1), (-1, 0), (-1, 1),
@@ -165,6 +166,13 @@ def _worker_day(
                     commands[role.unit_id] = move_command(step)
                     return gold_left, builds_left
     if _should_home(turn, role, memory):
+        shopped = _try_weapon_upgrade_shop(
+            turn, role, claimed, commands, gold_left, memory,
+        )
+        if shopped is not None:
+            return shopped, builds_left
+        if _try_cashout_sell(turn, role, claimed, commands, walls_missing, memory):
+            return gold_left, builds_left
         if walls_missing and count_item(role, WALL_MATERIAL):
             for site in list(walls_missing):
                 if site in claimed or distance(role.pos, site) > 1 or role.pos == site:
@@ -185,8 +193,8 @@ def _worker_day(
 
     # 09:00 逻辑:两名工人都去建塔/走近塔,不按 builder/miner 拆开。
     # 优先建前两个塔位，第三个只有在前面两个都满了之后才建。
-    # 三塔齐后:金币够先买升级券;包里有铜/铁先卖掉换金;第一天第 30 回合起砌墙。
-    # 第二天起若塔未满级且已有墙,先升塔不再扩墙。
+    # 三塔齐后继续采矿; 按距离在第 30 回合前最后阶段卖矿买券升塔,然后砌墙。
+    # 天黑前再把包里铜铁卖掉并升塔。第二天起若塔未满级且已有墙,先升塔不再扩墙。
     num_standing_towers = len(turn.weapons())
     if towers_missing and gold_left >= WEAPON_BUILD_COST and builds_left > 0:
         for index, site in enumerate(sites):
@@ -217,16 +225,15 @@ def _worker_day(
     )
     if shopped is not None:
         return shopped, builds_left
+    if _should_cashout(turn, role, gold_left):
+        if _try_cashout_sell(turn, role, claimed, commands, walls_missing, memory):
+            return gold_left, builds_left
     if (
         walls_missing
         and _should_wall_now(turn, walls_missing)
         and _try_build_adjacent_wall(
             turn, role, walls_missing, claimed, commands, memory,
         )
-    ):
-        return gold_left, builds_left
-    if _try_sell_for_upgrade(
-        turn, role, claimed, commands, walls_missing, memory,
     ):
         return gold_left, builds_left
     if walls_missing and _should_wall_now(turn, walls_missing):
@@ -285,8 +292,88 @@ def _should_home(turn: World, role: Unit, memory) -> bool:
         return False
     if _in_recall(turn):
         return True
+    slack = _recall_slack(turn)
+    if role.kind == "worker" and (
+        _has_metal(role) or _affordable_voucher(turn, role, turn.gold)
+    ):
+        trip, end = _cashout_turns(turn, role, turn.gold)
+        home = _recall_target(turn)
+        extra = _steps_to_adjacent(end, home) if home is not None else 0
+        return turn.round_in_day + trip + extra + slack >= DAY_ROUNDS
     travel = _travel_home(turn, role.pos)
-    return turn.round_in_day + travel + _recall_slack(turn) >= DAY_ROUNDS
+    return turn.round_in_day + travel + slack >= DAY_ROUNDS
+
+
+def _has_metal(role: Unit) -> bool:
+    return count_item(role, "copper") > 0 or count_item(role, "iron") > 0
+
+
+def _metal_value(role: Unit, turn: World) -> int:
+    return (
+        count_item(role, "copper") * turn.vendor_price("copper")
+        + count_item(role, "iron") * turn.vendor_price("iron")
+    )
+
+
+def _steps_to_adjacent(pos: Pos, dest: Pos | None) -> int:
+    if dest is None:
+        return 0
+    return max(0, distance(pos, dest) - 1)
+
+
+def _affordable_voucher(turn: World, role: Unit, gold: int) -> str | None:
+    for name in _weapon_voucher_wishlist(turn):
+        if backpack_item(role, name):
+            continue
+        item = turn.shop_item(name)
+        if item is not None and item.price <= gold:
+            return name
+    return None
+
+
+def _cashout_turns(turn: World, role: Unit, gold_left: int) -> tuple[int, Pos]:
+    """卖掉铜铁、再买升级券所需回合(切比雪夫贴邻为 0 步,动作各 1 回合)。"""
+    pos = role.pos
+    cost = 0
+    gold = gold_left
+    vendor = turn.vendor()
+    if _has_metal(role) and vendor is not None:
+        cost += _steps_to_adjacent(pos, vendor)
+        cost += 1
+        pos = vendor
+        gold += _metal_value(role, turn)
+    shop = turn.weapon_shop_pos()
+    if _affordable_voucher(turn, role, gold) is not None and shop is not None:
+        cost += _steps_to_adjacent(pos, shop)
+        cost += 1
+        pos = shop
+    return cost, pos
+
+
+def _in_pre_wall_cashout(turn: World, role: Unit, gold_left: int) -> bool:
+    """第一天第 30 回合前最后阶段:来得及卖矿买券才动身,保证先升塔再砌墙。"""
+    if turn.day_index != 1 or not turn.is_day or turn.round_no >= WALL_FROM:
+        return False
+    if not _towers_need_upgrade(turn):
+        return False
+    if _affordable_voucher(turn, role, gold_left + _metal_value(role, turn)) is None:
+        return False
+    trip, _ = _cashout_turns(turn, role, gold_left)
+    if trip <= 0:
+        return False
+    return turn.round_no + trip + CASHOUT_SLACK >= WALL_FROM
+
+
+def _should_cashout(turn: World, role: Unit, gold_left: int) -> bool:
+    if role.kind != "worker":
+        return False
+    if _in_pre_wall_cashout(turn, role, gold_left):
+        return True
+    if not turn.is_day:
+        return False
+    if not _has_metal(role) and _affordable_voucher(turn, role, gold_left) is None:
+        return False
+    return _should_home(turn, role, None)
 
 
 def _wall_phase(turn: World) -> bool:
@@ -484,7 +571,14 @@ def _worker_job_valid(
         if not _can_return_from(turn, role, job.target):
             return False
         want = _wanted_item(turn, role, gold_left, memory)
-        if _is_weapon_upgrade(want):
+        if _is_weapon_upgrade(want) and _should_cashout(turn, role, gold_left):
+            return False
+        shop = turn.weapon_shop_pos()
+        if (
+            _is_weapon_upgrade(want)
+            and shop is not None
+            and turn.adjacent_to_zone(role, shop)
+        ):
             return False
         if (
             walls_missing
@@ -588,7 +682,7 @@ def _pick_worker_job(
         return gold_left, builds_left
     if _try_sell(
         turn, role, claimed, commands, walls_missing,
-        force_metal=_towers_need_upgrade(turn),
+        force_metal=_should_cashout(turn, role, gold_left),
     ):
         _keep_job(
             memory, role, KIND_SELL, target=turn.vendor(),
@@ -764,7 +858,7 @@ def _try_build_adjacent_wall(
     return False
 
 
-def _try_sell_for_upgrade(
+def _try_cashout_sell(
     turn: World,
     role: Unit,
     claimed: set[Pos],
@@ -772,8 +866,8 @@ def _try_sell_for_upgrade(
     walls_missing: list[Pos],
     memory,
 ) -> bool:
-    """塔未满级且包里有铜/铁:去小贩卖掉换升塔金,不等攒满 8 个。"""
-    if not _towers_need_upgrade(turn):
+    """兑换窗口内把铜/铁卖掉;平时有几块矿不中断采矿。"""
+    if not _has_metal(role):
         return False
     if not _try_sell(
         turn, role, claimed, commands, walls_missing, force_metal=True,
@@ -1135,7 +1229,7 @@ def _try_sell(
         name, num = ore
         commands[role.unit_id] = sell_command(name, num)
         return True
-    if not _can_return_from(turn, role, vendor):
+    if not force_metal and not _can_return_from(turn, role, vendor):
         return False
     if force_metal or role.backpack_full or num_ores(role) >= SELL_THRESHOLD:
         return _walk_adjacent(turn, role, vendor, claimed, commands)
@@ -1162,6 +1256,10 @@ def _try_shop(
     if not _can_return_from(turn, role, shop):
         return False
     urgent = want.lower() in {item.lower() for item in memory.treasure_items} or want.lower().endswith("voucher1")
+    if _is_weapon_upgrade(want):
+        if _should_cashout(turn, role, gold_left) or turn.round_no >= WALL_FROM:
+            return _walk_adjacent(turn, role, shop, claimed, commands)
+        return False
     if urgent or gold_left >= 100:
         return _walk_adjacent(turn, role, shop, claimed, commands)
     return False
