@@ -150,19 +150,14 @@ def _worker_day(
         return gold_left, builds_left
     if _try_upgrade_or_fix(turn, role, commands):
         return gold_left, builds_left
-    for voucher in ("WeaponUpgradeVoucher1", "WeaponUpgradeVoucher2"):
-        if backpack_item(role, voucher):
-            for unit in turn.ours:
-                if unit.kind not in TOWER_TYPES:
-                    continue
-                if unit.level == 3:
-                    continue
-                if _adjacent_building(turn, role, unit):
-                    continue
-                step = _step_toward(turn, role, unit.pos, claimed)
-                if step is not None:
-                    commands[role.unit_id] = move_command(step)
-                    return gold_left, builds_left
+    upgrade = _next_upgrade(turn, role)
+    if upgrade is not None:
+        _, target = upgrade
+        if not _adjacent_building(turn, role, target):
+            step = _step_toward(turn, role, target.pos, claimed)
+            if step is not None:
+                commands[role.unit_id] = move_command(step)
+                return gold_left, builds_left
     if _should_home(turn, role, memory):
         if walls_missing and count_item(role, WALL_MATERIAL):
             for site in list(walls_missing):
@@ -184,7 +179,8 @@ def _worker_day(
 
     # 09:00 逻辑:两名工人都去建塔/走近塔,不按 builder/miner 拆开。
     # 优先建前两个塔位，第三个只有在前面两个都满了之后才建。
-    # 三塔齐后先采矿换钱、能升塔就升塔; 全局第 30 回合起才砌墙。
+    # 三塔齐后先采矿换钱、能升塔就升塔; 第 30 回合起砌墙,第一天把墙建齐。
+    # 建完后升级顺序:武器 > 朝向敌人的围墙(从地图中心向外) > 其余围墙 > 基地。
     num_standing_towers = len(turn.weapons())
     if towers_missing and gold_left >= WEAPON_BUILD_COST and builds_left > 0:
         for index, site in enumerate(sites):
@@ -260,6 +256,95 @@ def _weapon_voucher_wishlist(turn: World) -> list[str]:
     if any(unit.kind in TOWER_TYPES and unit.level == 2 for unit in turn.ours):
         names.append("WeaponUpgradeVoucher2")
     return names
+
+
+def _weapons_need_upgrade(turn: World) -> bool:
+    return any(unit.kind in TOWER_TYPES and unit.level < 3 for unit in turn.ours)
+
+
+def _wall_upgrade_wishlist(turn: World) -> list[str]:
+    """朝向敌人的墙先升到 3 级,从中心那几段开始;背向的墙排在后面。"""
+    facing_levels = {1: False, 2: False}
+    other_levels = {1: False, 2: False}
+    for wall in turn.walls():
+        if wall.level not in (1, 2):
+            continue
+        bucket = facing_levels if _on_incoming_side(wall.pos, turn) else other_levels
+        bucket[wall.level] = True
+    names: list[str] = []
+    if facing_levels[1]:
+        names.append("WallUpgradeVoucher1")
+    elif facing_levels[2]:
+        names.append("WallUpgradeVoucher2")
+    elif other_levels[1]:
+        names.append("WallUpgradeVoucher1")
+    elif other_levels[2]:
+        names.append("WallUpgradeVoucher2")
+    return names
+
+
+def _station_voucher_wishlist(turn: World) -> list[str]:
+    station = turn.station()
+    if station is None:
+        return []
+    if station.level == 1:
+        return ["StationUpgradeVoucher1"]
+    if station.level == 2:
+        return ["StationUpgradeVoucher2"]
+    return []
+
+
+def _upgrade_buy_list(turn: World) -> list[str]:
+    """购买顺序:武器券 > 围墙券 > 基地券。武器未满级时不买墙和基地。"""
+    weapons = _weapon_voucher_wishlist(turn)
+    if weapons:
+        return weapons
+    return _wall_upgrade_wishlist(turn) + _station_voucher_wishlist(turn)
+
+
+def _best_upgrade_unit(turn: World, role: Unit, voucher: str) -> Unit | None:
+    spec = UPGRADE_MAP.get(voucher)
+    if spec is None:
+        return None
+    kinds, level = spec
+    candidates = [
+        unit for unit in turn.ours
+        if unit.kind in kinds and unit.level == level
+    ]
+    if not candidates:
+        return None
+    if WALL in kinds:
+        center = _map_center(turn)
+        facing = [unit for unit in candidates if _on_incoming_side(unit.pos, turn)]
+        pool = facing or candidates
+        return min(
+            pool,
+            key=lambda unit: (distance(unit.pos, center), unit.pos.x, unit.pos.y),
+        )
+    return min(
+        candidates,
+        key=lambda unit: (distance(role.pos, unit.pos), unit.unit_id),
+    )
+
+
+def _next_upgrade(turn: World, role: Unit) -> tuple[str, Unit] | None:
+    """背包里按武器 > 围墙 > 基地挑下一张能用的升级券和目标。"""
+    for voucher in (
+        "WeaponUpgradeVoucher1",
+        "WeaponUpgradeVoucher2",
+        "WallUpgradeVoucher1",
+        "WallUpgradeVoucher2",
+        "StationUpgradeVoucher1",
+        "StationUpgradeVoucher2",
+    ):
+        name = backpack_item(role, voucher)
+        if name is None:
+            continue
+        target = _best_upgrade_unit(turn, role, voucher)
+        if target is None:
+            continue
+        return name, target
+    return None
 
 
 def _try_weapon_upgrade_shop(
@@ -950,16 +1035,11 @@ def _try_heal(role: Unit, commands: dict[int, dict[str, Any]]) -> bool:
 def _try_upgrade_or_fix(
     turn: World, role: Unit, commands: dict[int, dict[str, Any]],
 ) -> bool:
-    for voucher, (kinds, level) in UPGRADE_MAP.items():
-        name = backpack_item(role, voucher)
-        if name is None:
-            continue
-        for unit in turn.ours:
-            if unit.kind not in kinds or unit.level != level:
-                continue
-            if not _adjacent_building(turn, role, unit):
-                continue
-            commands[role.unit_id] = use_command(name, unit.pos)
+    upgrade = _next_upgrade(turn, role)
+    if upgrade is not None:
+        name, target = upgrade
+        if _adjacent_building(turn, role, target):
+            commands[role.unit_id] = use_command(name, target.pos)
             return True
     fixer = backpack_item(role, "WallFixer")
     if fixer:
@@ -1027,18 +1107,25 @@ def _try_shop(
     if turn.adjacent_to_zone(role, shop):
         commands[role.unit_id] = buy_command(want, 1)
         return True
-    urgent = want.lower() in {item.lower() for item in memory.treasure_items} or want.lower().endswith("voucher1")
+    urgent = (
+        want.lower() in {item.lower() for item in memory.treasure_items}
+        or "upgradevoucher" in want.lower()
+    )
     if urgent or gold_left >= 100:
         return _walk_adjacent(turn, role, shop, claimed, commands)
     return False
 
 
 def _wanted_item(turn: World, role: Unit, gold_left: int, memory) -> str | None:
-    for name in _weapon_voucher_wishlist(turn):
-        item = turn.shop_item(name)
-        if item is None or item.price > gold_left:
+    for name in _upgrade_buy_list(turn):
+        if not name.startswith("Weapon") and _weapons_need_upgrade(turn):
             continue
         if backpack_item(role, name):
+            if _best_upgrade_unit(turn, role, name) is not None:
+                return None
+            continue
+        item = turn.shop_item(name)
+        if item is None or item.price > gold_left:
             continue
         return name
     if treasure_ready(turn, memory) or memory.treasure_items:
@@ -1047,8 +1134,6 @@ def _wanted_item(turn: World, role: Unit, gold_left: int, memory) -> str | None:
             if item and item.price <= gold_left:
                 return item.name
     wishlist: list[str] = []
-    if turn.station() and turn.station().level == 1:
-        wishlist.append("StationUpgradeVoucher1")
     cap = HERO_MAX_HP.get(role.kind, 0)
     if role.health < cap and backpack_item(role, "Medicine") is None:
         wishlist.append("Medicine")
