@@ -92,8 +92,8 @@ def test_miner_keeps_copper_when_gold_still_short(make_payload):
         assert distance(step2, SHOP) >= distance(step1, SHOP)
 
 
-def test_miner_drops_copper_to_buy_weapon_upgrade(make_payload):
-    """采铜途中金币突然够买武器券:放下矿去商店升塔。"""
+def test_miner_keeps_mining_when_gold_enough_before_cashout_window(make_payload):
+    """离第 30 回合还早、金币突然够买武器券:继续采铜,等到最后阶段再去商店。"""
     payload = fresh(make_payload(roundNo=10))
     payload["teamOur"]["goldNum"] = 20
     _park_economy(payload)
@@ -105,6 +105,7 @@ def test_miner_drops_copper_to_buy_weapon_upgrade(make_payload):
     job = tasks_mod.MEMORY.jobs.get(WORKER_1)
     assert job is not None
     assert job.kind == KIND_MINE
+    assert job.target == COPPER_NEAR
 
     step1 = move_pos(first, WORKER_1)
     assert step1 is not None
@@ -113,17 +114,34 @@ def test_miner_drops_copper_to_buy_weapon_upgrade(make_payload):
     payload["teamOur"]["goldNum"] = 200
     second = decide(payload)
     _validate(second, payload)
-    shop_job = tasks_mod.MEMORY.jobs.get(WORKER_1)
-    assert shop_job is not None
-    assert shop_job.kind == KIND_SHOP
-    action = action_of(second, WORKER_1)
+    stuck = tasks_mod.MEMORY.jobs.get(WORKER_1)
+    assert stuck is not None
+    assert stuck.kind == KIND_MINE
+    assert stuck.target == COPPER_NEAR
+    assert action_of(second, WORKER_1) != "buy"
+    step2 = move_pos(second, WORKER_1)
+    if step2 is not None:
+        assert distance(step2, COPPER_NEAR) < distance(step1, COPPER_NEAR)
+        assert distance(step2, SHOP) >= distance(step1, SHOP)
+
+
+def test_pre_wall_window_walks_to_shop_when_gold_enough(make_payload):
+    """第 30 回合前最后阶段金币够:远离商店的工人应走向商店买升级券。"""
+    payload = fresh(make_payload(roundNo=22))
+    payload["teamOur"]["goldNum"] = 200
+    _park_economy(payload)
+    start = Pos(16, 8)
+    place(payload, WORKER_1, start.x, start.y, backpack=[])
+    response = decide(payload)
+    _validate(response, payload)
+    action = action_of(response, WORKER_1)
     assert action in {"move", "buy"}
     if action == "buy":
-        assert second[str(WORKER_1)].get("name") == "WeaponUpgradeVoucher1"
-    else:
-        step2 = move_pos(second, WORKER_1)
-        assert step2 is not None
-        assert distance(step2, SHOP) < distance(step1, SHOP)
+        assert response[str(WORKER_1)].get("name") == "WeaponUpgradeVoucher1"
+        return
+    step = move_pos(response, WORKER_1)
+    assert step is not None
+    assert distance(step, SHOP) < distance(start, SHOP)
 
 
 def test_failed_collect_walks_off_blocked_adjacent_mine(make_payload):
