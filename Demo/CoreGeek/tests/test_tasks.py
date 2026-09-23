@@ -300,10 +300,18 @@ def test_llm_json_still_wins_over_fallback():
     assert answer == ""
 
 
+def _decode_script(execute: str) -> str:
+    import base64
+    import re
+
+    match = re.search(r"b64decode\('([^']+)'\)", execute)
+    assert match, execute[:120]
+    return base64.b64decode(match.group(1)).decode("utf-8")
+
+
 def test_prompt_and_command_do_not_search_chinese_filename():
-    """「请阅读….md」不能再被当成 find -name。"""
+    """「请阅读….md」不能再被当成 find -name。脚本是单行 base64，shell 才能跑。"""
     import ast
-    import json
 
     phase = "请阅读task_1_alpha.md，获取任务信息"
     prompt = task_prompt(_world(phaseTask=phase))
@@ -313,8 +321,11 @@ def test_prompt_and_command_do_not_search_chinese_filename():
     execute, _answer = next_task_command(_world(phaseTask=phase), memory)
     assert "请阅读task_1_alpha.md" not in execute
     assert "task_1_alpha.md" in execute
-    script = json.loads(execute[len("python3 -c "):])
+    assert "\n" not in execute
+    assert "base64" in execute
+    script = _decode_script(execute)
     ast.parse(script)
+    assert "*.md" in script
     bad = _world(
         phaseTask=phase,
         llmResp="{\"executeCmd\":\"find /tmp/selfEvolutionTask -name '请阅读task_1_alpha.md'\",\"taskAnswer\":\"\"}",
@@ -368,10 +379,9 @@ def test_task_text_calls_localhost_api():
     assert "请阅读" not in execute
 
 
-def test_need_fix_waits_then_patches_from_spec():
-    """工程题先把检查结果交给内嵌模型，下一回合再按 spec 打补丁。"""
+def test_need_fix_patches_immediately():
+    """检查没过时本回合就按 spec 打补丁，不空等模型。"""
     import ast
-    import json
 
     body = (
         "TASK_FILE\n/tmp/selfEvolutionTask/1-fixed-step/2-engineering-fix/task_1_alpha.md\n"
@@ -389,17 +399,88 @@ def test_need_fix_waits_then_patches_from_spec():
         memory,
     )
     assert answer == ""
-    assert execute == ""
-    patch, patch_answer = next_task_command(
-        _world(phaseTask="请阅读task_1_alpha.md，获取任务信息"),
-        memory,
-    )
-    assert patch_answer == ""
-    assert "请阅读" not in patch
-    script = json.loads(patch[len("python3 -c "):])
+    assert execute
+    assert "请阅读" not in execute
+    script = _decode_script(execute)
     ast.parse(script)
     assert "spec.md" in script
     assert "./check" in script
+
+
+def test_check_token_submits_without_empty_wait():
+    """检查输出里的 token 要当回合提交，不能再空等模型。"""
+    body = (
+        "TASK_TEXT\n修好后提交检查给的 token。\n"
+        "CHECK_OUT\n6/6\ntoken: deadbeef\n"
+        "CHECK_PASS\n"
+    )
+    execute, answer = next_task_command(
+        _world(
+            phaseTask="请阅读task_1_alpha.md，获取任务信息",
+            lastCmdResult="[exitCode:0]\n" + body,
+        ),
+        Memory(),
+    )
+    assert execute == ""
+    assert answer == "deadbeef"
+
+
+def test_check_pass_without_token_reruns():
+    """通过了但没有 token 时立刻再跑，不把回合空掉。"""
+    body = "TASK_TEXT\n修好。\nCHECK_OUT\n6/6\nCHECK_PASS\n"
+    execute, answer = next_task_command(
+        _world(
+            phaseTask="请阅读task_1_beta.md，获取任务信息",
+            lastCmdResult="[exitCode:0]\n" + body,
+        ),
+        Memory(),
+    )
+    assert answer == ""
+    assert execute
+    assert "base64" in execute
+
+
+def test_answer_line_submits_after_failed_exit():
+    """check 打出 ANSWER 时，即使退出码是 1 也立刻提交。"""
+    execute, answer = next_task_command(
+        _world(
+            phaseTask="请阅读task_1_alpha.md，获取任务信息",
+            lastCmdResult="[exitCode:1]\nCHECK_PASS\nANSWER\nabc123token\n",
+        ),
+        Memory(),
+    )
+    assert execute == ""
+    assert answer == "abc123token"
+
+
+def test_llm_503_uses_local_command():
+    """内嵌模型 HTTP 503 时仍发出本地沙盒命令，不把这一回合空掉。"""
+    from agent.tasks import llm_unavailable, should_ask_model
+
+    phase = "请阅读task_1_gamma.md，获取任务信息"
+    world = _world(phaseTask=phase, llmResp="LLM 调用失败（3 次尝试）: LLM 响应非200，HTTP 503")
+    assert llm_unavailable(world)
+    execute, answer = next_task_command(world, Memory())
+    assert answer == ""
+    assert "base64" in execute
+    assert "task_1_gamma.md" in execute
+    assert not should_ask_model(world, execute, answer)
+    assert should_ask_model(_world(phaseTask=phase), "", "")
+    assert not should_ask_model(_world(phaseTask=phase), "pwd", "")
+
+
+def test_failed_sandbox_command_is_not_repeated():
+    """exitCode 非 0 时下一条命令必须换掉，不能把失败命令再发一遍。"""
+    phase = "请阅读task_1_alpha.md，获取任务信息"
+    memory = Memory()
+    first, _answer = next_task_command(_world(phaseTask=phase), memory)
+    memory.task_step = 0
+    second, _answer = next_task_command(
+        _world(phaseTask=phase, lastCmdResult="[exitCode:1]\nboom"),
+        memory,
+    )
+    assert second
+    assert second != first
 
 
 # ---------- 背包操作辅助 ----------
