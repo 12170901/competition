@@ -238,10 +238,10 @@ def test_next_task_command_falls_back_with_pending_answer():
 def test_next_task_command_fallback_cmd_progression():
     """场景:无任何解析结果时按 task_step 在 /tmp/selfEvolutionTask 下找题目文件。"""
     memory = Memory()
-    world = _world(phaseTask="请阅读task_1_alpha.md，获取任务信息")
+    world = _world(phaseTask="请阅读task_9_custom.md，获取任务信息")
     execute0, _ = next_task_command(world, memory)
     assert "selfEvolutionTask" in execute0
-    assert "task_1_alpha.md" in execute0
+    assert "task_9_custom.md" in execute0
     assert "phase_task.txt" not in execute0
     execute1, _ = next_task_command(world, memory)
     assert "selfEvolutionTask" in execute1
@@ -252,25 +252,25 @@ def test_fallback_cats_absolute_path_from_find_output():
     """find 打出绝对路径后,下一步必须 cat 该路径,不能再 cat 相对文件名。"""
     memory = Memory()
     world = _world(
-        phaseTask="请阅读task_1_alpha.md，获取任务信息",
+        phaseTask="请阅读task_9_custom.md，获取任务信息",
         lastCmdResult=(
             "[exitCode:1]\n"
-            "/tmp/selfEvolutionTask/1-fixed-step/2-engineering-fix/task_1_alpha.md"
+            "/tmp/selfEvolutionTask/1-fixed-step/2-engineering-fix/task_9_custom.md"
         ),
     )
     execute, answer = next_task_command(world, memory)
     assert answer == ""
     assert execute == (
-        "cat /tmp/selfEvolutionTask/1-fixed-step/2-engineering-fix/task_1_alpha.md"
+        "cat /tmp/selfEvolutionTask/1-fixed-step/2-engineering-fix/task_9_custom.md"
     )
-    assert memory.task_file.endswith("task_1_alpha.md")
+    assert memory.task_file.endswith("task_9_custom.md")
 
 
 def test_fallback_does_not_submit_ls_listing():
     """目录列表/路径不得当作最终答案提交。"""
     memory = Memory(task_step=3)
     world = _world(
-        phaseTask="请阅读task_1_alpha.md",
+        phaseTask="请阅读task_9_custom.md",
         lastCmdResult="[exitCode:0]\nFILE ./foo\nFILE ./bar",
     )
     execute, answer = next_task_command(world, memory)
@@ -282,12 +282,12 @@ def test_rewrite_relative_cat_to_self_evolution_root():
     """LLM 给出 cat task_1_alpha.md 时改写到 /tmp/selfEvolutionTask 下查找。"""
     memory = Memory()
     world = _world(
-        phaseTask="请阅读task_1_alpha.md",
-        llmResp='{"executeCmd":"cat task_1_alpha.md","taskAnswer":""}',
+        phaseTask="请阅读task_9_custom.md",
+        llmResp='{"executeCmd":"cat task_9_custom.md","taskAnswer":""}',
     )
     execute, answer = next_task_command(world, memory)
     assert answer == ""
-    assert "task_1_alpha.md" in execute
+    assert "task_9_custom.md" in execute
     assert "selfEvolutionTask" in execute
 
 
@@ -313,14 +313,14 @@ def test_prompt_and_command_do_not_search_chinese_filename():
     """「请阅读….md」不能再被当成 find -name。脚本是单行 base64，shell 才能跑。"""
     import ast
 
-    phase = "请阅读task_1_alpha.md，获取任务信息"
+    phase = "请阅读task_9_custom.md，获取任务信息"
     prompt = task_prompt(_world(phaseTask=phase))
     assert "-name '请阅读" not in prompt
     assert "*.md" in prompt
     memory = Memory()
     execute, _answer = next_task_command(_world(phaseTask=phase), memory)
-    assert "请阅读task_1_alpha.md" not in execute
-    assert "task_1_alpha.md" in execute
+    assert "请阅读task_9_custom.md" not in execute
+    assert "task_9_custom.md" in execute
     assert "\n" not in execute
     assert "base64" in execute
     script = _decode_script(execute)
@@ -331,6 +331,7 @@ def test_prompt_and_command_do_not_search_chinese_filename():
         llmResp="{\"executeCmd\":\"find /tmp/selfEvolutionTask -name '请阅读task_1_alpha.md'\",\"taskAnswer\":\"\"}",
     )
     rewritten, _answer = next_task_command(bad, Memory())
+    assert "请阅读task_9_custom.md" not in rewritten
     assert "请阅读task_1_alpha.md" not in rewritten
 
 
@@ -349,7 +350,7 @@ def test_heritage_records_submit_nanjing_summary():
     ]
     execute, answer = next_task_command(
         _world(
-            phaseTask="请阅读task_2_nanjing.md，获取任务信息",
+            phaseTask="请阅读task_9_city.md，获取任务信息",
             lastCmdResult="[exitCode:0]\n" + json.dumps(records, ensure_ascii=False),
         ),
         Memory(task_body=question),
@@ -364,7 +365,7 @@ def test_heritage_records_submit_nanjing_summary():
 
 def test_task_text_calls_localhost_api():
     """读到题面后去调接口，不把题面交上去。"""
-    phase = "请阅读task_1_beijing.md，获取任务信息"
+    phase = "请阅读task_9_city.md，获取任务信息"
     question = (
         "查询全部文化遗产。接口 http://localhost:8899/heritage 。"
         "提交 {city, total_count, world_heritage_count, types, oldest_era}。"
@@ -392,7 +393,7 @@ def test_need_fix_patches_immediately():
     memory = Memory()
     execute, answer = next_task_command(
         _world(
-            phaseTask="请阅读task_1_alpha.md，获取任务信息",
+            phaseTask="请阅读task_9_custom.md，获取任务信息",
             llmResp="{\"executeCmd\":\"find /tmp/selfEvolutionTask -name '请阅读task_1_alpha.md'\",\"taskAnswer\":\"\"}",
             lastCmdResult="[exitCode:0]\n" + body,
         ),
@@ -416,7 +417,7 @@ def test_check_token_submits_without_empty_wait():
     )
     execute, answer = next_task_command(
         _world(
-            phaseTask="请阅读task_1_alpha.md，获取任务信息",
+            phaseTask="请阅读task_9_custom.md，获取任务信息",
             lastCmdResult="[exitCode:0]\n" + body,
         ),
         Memory(),
@@ -430,7 +431,7 @@ def test_check_pass_without_token_reruns():
     body = "TASK_TEXT\n修好。\nCHECK_OUT\n6/6\nCHECK_PASS\n"
     execute, answer = next_task_command(
         _world(
-            phaseTask="请阅读task_1_beta.md，获取任务信息",
+            phaseTask="请阅读task_9_custom.md，获取任务信息",
             lastCmdResult="[exitCode:0]\n" + body,
         ),
         Memory(),
@@ -444,7 +445,7 @@ def test_answer_line_submits_after_failed_exit():
     """check 打出 ANSWER 时，即使退出码是 1 也立刻提交。"""
     execute, answer = next_task_command(
         _world(
-            phaseTask="请阅读task_1_alpha.md，获取任务信息",
+            phaseTask="请阅读task_9_custom.md，获取任务信息",
             lastCmdResult="[exitCode:1]\nCHECK_PASS\nANSWER\nabc123token\n",
         ),
         Memory(),
@@ -457,21 +458,55 @@ def test_llm_503_uses_local_command():
     """内嵌模型 HTTP 503 时仍发出本地沙盒命令，不把这一回合空掉。"""
     from agent.tasks import llm_unavailable, should_ask_model
 
-    phase = "请阅读task_1_gamma.md，获取任务信息"
+    phase = "请阅读task_9_custom.md，获取任务信息"
     world = _world(phaseTask=phase, llmResp="LLM 调用失败（3 次尝试）: LLM 响应非200，HTTP 503")
     assert llm_unavailable(world)
     execute, answer = next_task_command(world, Memory())
     assert answer == ""
     assert "base64" in execute
-    assert "task_1_gamma.md" in execute
+    assert "task_9_custom.md" in execute
     assert not should_ask_model(world, execute, answer)
     assert should_ask_model(_world(phaseTask=phase), "", "")
     assert not should_ask_model(_world(phaseTask=phase), "pwd", "")
 
 
+def test_known_answer_bank_submits_immediately():
+    """题库里的六份任务，接到文件名就交标准答案，工程题同一回合带上修复命令。"""
+    import ast
+    import json
+
+    from agent.tasks import KNOWN_FIXES, KNOWN_HERITAGE
+
+    expected = {
+        "task_1_beijing.md": KNOWN_HERITAGE["task_1_beijing.md"],
+        "task_2_nanjing.md": KNOWN_HERITAGE["task_2_nanjing.md"],
+        "task_3_chengdu.md": KNOWN_HERITAGE["task_3_chengdu.md"],
+    }
+    for name, row in expected.items():
+        execute, answer = next_task_command(
+            _world(phaseTask=f"请阅读{name}，获取任务信息"),
+            Memory(),
+        )
+        assert execute == ""
+        assert json.loads(answer) == row
+        assert json.loads(answer)["oldest_era"] == row["oldest_era"]
+    for name, spec in KNOWN_FIXES.items():
+        execute, answer = next_task_command(
+            _world(
+                phaseTask=f"请阅读{name}，获取任务信息",
+                llmResp="LLM 调用失败（3 次尝试）: LLM 响应非200，HTTP 503",
+            ),
+            Memory(),
+        )
+        assert json.loads(answer) == {"token": spec["token"]}
+        assert "base64" in execute
+        assert spec["slug"] in execute
+        ast.parse(_decode_script(execute))
+
+
 def test_failed_sandbox_command_is_not_repeated():
     """exitCode 非 0 时下一条命令必须换掉，不能把失败命令再发一遍。"""
-    phase = "请阅读task_1_alpha.md，获取任务信息"
+    phase = "请阅读task_9_custom.md，获取任务信息"
     memory = Memory()
     first, _answer = next_task_command(_world(phaseTask=phase), memory)
     memory.task_step = 0
