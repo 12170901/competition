@@ -300,6 +300,108 @@ def test_llm_json_still_wins_over_fallback():
     assert answer == ""
 
 
+def test_prompt_and_command_do_not_search_chinese_filename():
+    """「请阅读….md」不能再被当成 find -name。"""
+    import ast
+    import json
+
+    phase = "请阅读task_1_alpha.md，获取任务信息"
+    prompt = task_prompt(_world(phaseTask=phase))
+    assert "-name '请阅读" not in prompt
+    assert "*.md" in prompt
+    memory = Memory()
+    execute, _answer = next_task_command(_world(phaseTask=phase), memory)
+    assert "请阅读task_1_alpha.md" not in execute
+    assert "task_1_alpha.md" in execute
+    script = json.loads(execute[len("python3 -c "):])
+    ast.parse(script)
+    bad = _world(
+        phaseTask=phase,
+        llmResp="{\"executeCmd\":\"find /tmp/selfEvolutionTask -name '请阅读task_1_alpha.md'\",\"taskAnswer\":\"\"}",
+    )
+    rewritten, _answer = next_task_command(bad, Memory())
+    assert "请阅读task_1_alpha.md" not in rewritten
+
+
+def test_heritage_records_submit_nanjing_summary():
+    """接口返回原始记录时，按题面收成南京统计。"""
+    import json
+
+    question = (
+        "查询南京市全部文化遗产。接口 http://localhost:8899/heritage 。"
+        "提交 {city, total_count, world_heritage_count, types, oldest_era}。"
+    )
+    records = [
+        {"city": "南京", "type": "古建", "era": "明", "world_heritage": True},
+        {"city": "南京", "type": "遗址", "era": "商", "world_heritage": False},
+        {"city": "北京", "type": "古建", "era": "清", "world_heritage": True},
+    ]
+    execute, answer = next_task_command(
+        _world(
+            phaseTask="请阅读task_2_nanjing.md，获取任务信息",
+            lastCmdResult="[exitCode:0]\n" + json.dumps(records, ensure_ascii=False),
+        ),
+        Memory(task_body=question),
+    )
+    assert execute == ""
+    parsed = json.loads(answer)
+    assert parsed["city"] == "南京"
+    assert parsed["total_count"] == 2
+    assert parsed["world_heritage_count"] == 1
+    assert parsed["oldest_era"] == "商"
+
+
+def test_task_text_calls_localhost_api():
+    """读到题面后去调接口，不把题面交上去。"""
+    phase = "请阅读task_1_beijing.md，获取任务信息"
+    question = (
+        "查询全部文化遗产。接口 http://localhost:8899/heritage 。"
+        "提交 {city, total_count, world_heritage_count, types, oldest_era}。"
+    )
+    memory = Memory()
+    execute, answer = next_task_command(
+        _world(phaseTask=phase, lastCmdResult="[exitCode:0]\n" + question),
+        memory,
+    )
+    assert answer == ""
+    assert "localhost:8899" in execute
+    assert "请阅读" not in execute
+
+
+def test_need_fix_waits_then_patches_from_spec():
+    """工程题先把检查结果交给内嵌模型，下一回合再按 spec 打补丁。"""
+    import ast
+    import json
+
+    body = (
+        "TASK_FILE\n/tmp/selfEvolutionTask/1-fixed-step/2-engineering-fix/task_1_alpha.md\n"
+        "TASK_TEXT\n进入 ws_1，按 spec.md 修到 ./check 通过。答案是 FIXED。\n"
+        "CHECK_OUT\n1/6\n"
+        "NEED_FIX\n"
+    )
+    memory = Memory()
+    execute, answer = next_task_command(
+        _world(
+            phaseTask="请阅读task_1_alpha.md，获取任务信息",
+            llmResp="{\"executeCmd\":\"find /tmp/selfEvolutionTask -name '请阅读task_1_alpha.md'\",\"taskAnswer\":\"\"}",
+            lastCmdResult="[exitCode:0]\n" + body,
+        ),
+        memory,
+    )
+    assert answer == ""
+    assert execute == ""
+    patch, patch_answer = next_task_command(
+        _world(phaseTask="请阅读task_1_alpha.md，获取任务信息"),
+        memory,
+    )
+    assert patch_answer == ""
+    assert "请阅读" not in patch
+    script = json.loads(patch[len("python3 -c "):])
+    ast.parse(script)
+    assert "spec.md" in script
+    assert "./check" in script
+
+
 # ---------- 背包操作辅助 ----------
 
 def test_missing_treasure_items_accounts_duplicates():
