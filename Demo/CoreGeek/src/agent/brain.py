@@ -819,7 +819,8 @@ def _run_task(
     execute_cmd, answer = next_task_command(turn, memory)
     if answer:
         commands[role.unit_id] = submit_answer_command(answer)
-        execute_cmd = ""
+        if not _near_own_task(turn, role):
+            execute_cmd = ""
     elif not _near_own_task(turn, role):
         # 人还没站到任务点，这条沙盒命令发不出去，不能把一次性求解的进度记掉。
         memory.task_step = step_before
@@ -942,9 +943,8 @@ def _night(
             execute_cmd, answer = next_task_command(turn, memory)
             if answer:
                 commands[pioneer.unit_id] = submit_answer_command(answer)
-                busy.add(pioneer.unit_id)
                 execute_cmd = ""
-            # 黑夜不发任务 prompt。503 会把整回合决策丢掉，开拓者必须去操塔。
+            # 不把开拓者标成忙碌：黑夜必须继续操塔。任务 prompt 也不发，避免 503 丢掉开火。
     for role in turn.controllable():
         if role.unit_id in busy:
             continue
