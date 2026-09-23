@@ -60,11 +60,14 @@ from .tasks import (
 )
 from .world import HERO_MAX_HP, World, backpack_item, count_item
 
-TOWER_LOADOUT = ("rocket", "rocket", "rocket")
+# 朝向敌人的两座用远/中程，背后留火箭。和对方火力网一样覆盖远近。
+TOWER_LOADOUT = ("railgun", "gatling", "rocket")
 STONE_KEEP = 4
 RECALL_ROUNDS = 5
 RECALL_FROM = DAY_ROUNDS - RECALL_ROUNDS + 1
 WALL_FROM = 30
+OUTER_WALL_FROM = 301
+ROBOT_ATTACK_RANGE = 3
 EDGE_MINE_MAX = 4
 _NEIGHBOUR_STEPS = (
     (-1, -1), (-1, 0), (-1, 1),
@@ -105,7 +108,7 @@ def _day(
     commands: dict[int, dict[str, Any]],
 ) -> tuple[str, str]:
     sites = _tower_sites(turn)
-    order = _wall_order(turn)
+    order = _defense_walls(turn)
     standing_towers = {unit.pos for unit in turn.weapons()}
     standing_walls = {unit.pos for unit in turn.walls()}
     occupied = turn.occupied_for_build()
@@ -180,8 +183,9 @@ def _worker_day(
 
     # 09:00 逻辑:两名工人都去建塔/走近塔,不按 builder/miner 拆开。
     # 优先建前两个塔位，第三个只有在前面两个都满了之后才建。
-    # 三塔齐后先采矿换钱、能升塔就升塔; 第 30 回合起砌墙,第一天把墙建齐。
-    # 建完后升级顺序:武器 > 朝向敌人的围墙(从地图中心向外) > 其余围墙 > 基地。
+    # 三塔是电磁炮、加特林、火箭，先把火力网立起来。
+    # 三塔齐后先采矿换钱、能升塔就升塔; 第 30 回合起砌朝向敌人的墙。
+    # 第 301 回合起再向外扩一圈。升级顺序:武器 > 朝向敌人的围墙 > 基地。
     num_standing_towers = len(turn.weapons())
     if towers_missing and gold_left >= WEAPON_BUILD_COST and builds_left > 0:
         for index, site in enumerate(sites):
@@ -930,9 +934,69 @@ def _sticky_weapon_pairs(
     return pairs
 
 
+def _hostile_robots(turn: World) -> list:
+    """夜里冲着我方来的机器人。清完就可以出塔干活，不必干等到天亮。"""
+    return [
+        robot for robot in turn.robots
+        if robot.health > 0 and robot.target_team in ("", turn.team_type)
+    ]
+
+
+def _lane_penalty(turn: World, pos: Pos) -> tuple[int, int]:
+    """落在来袭路线上、且处于机器人攻击距离内的格子更危险。"""
+    station = turn.station()
+    if station is None:
+        return (0, 0)
+    goal = station.pos
+    hits = 0
+    nearest = 99
+    for robot in _hostile_robots(turn):
+        gap = distance(robot.pos, pos)
+        if gap < nearest:
+            nearest = gap
+        span = distance(robot.pos, goal)
+        if (
+            gap <= ROBOT_ATTACK_RANGE
+            and gap + distance(pos, goal) <= span
+        ):
+            hits += 1
+    return (hits, -(nearest if nearest < 99 else 0))
+
+
+def _night_step_toward(
+    turn: World,
+    role: Unit,
+    target: Pos,
+    claimed: set[Pos],
+) -> Pos | None:
+    """走向炮位时，能躲开机器人进路就躲开，同时仍然要更靠近塔。"""
+    step = _step_toward(turn, role, target, claimed)
+    if step is None:
+        return None
+    if _lane_penalty(turn, step)[0] == 0:
+        return step
+    claimed.discard(step)
+    best = step
+    best_key = (_lane_penalty(turn, step), distance(step, target), step.x, step.y)
+    blocked = turn.blocked(role)
+    for nxt in _neighbours(role.pos):
+        if nxt in claimed or nxt in blocked or not turn.land(nxt):
+            continue
+        if distance(nxt, target) >= distance(role.pos, target):
+            continue
+        key = (_lane_penalty(turn, nxt), distance(nxt, target), nxt.x, nxt.y)
+        if key < best_key:
+            best = nxt
+            best_key = key
+    claimed.add(best)
+    return best
+
+
 def _night(
     turn: World, memory, commands: dict[int, dict[str, Any]],
 ) -> tuple[str, str]:
+    if not _hostile_robots(turn):
+        return _day(turn, memory, commands)
     claimed: set[Pos] = set()
     busy: set[int] = set()
     execute_cmd = ""
@@ -969,7 +1033,7 @@ def _night(
                     f"角色 {role.unit_id} 已贴塔 {tower.unit_id} 待命（射程内无目标）"
                 )
             continue
-        step = _step_toward(turn, role, tower.pos, claimed)
+        step = _night_step_toward(turn, role, tower.pos, claimed)
         if step is not None:
             commands[role.unit_id] = move_command(step)
     if not prompt:
@@ -1547,6 +1611,21 @@ def _on_incoming_side(pos: Pos, turn: World) -> bool:
     if _center_facing_east(turn):
         return pos.x > mid_x
     return pos.x < mid_x
+
+
+def _defense_walls(turn: World) -> tuple[Pos, ...]:
+    """第 301 回合起，在朝向敌人的内圈之外再加一圈。"""
+    inner = _wall_order(turn)
+    if turn.round_no < OUTER_WALL_FROM or turn.station() is None:
+        return inner
+    seen = set(inner)
+    extra = [
+        pos for pos in _cells_at_distance(turn.station().pos, 3)
+        if turn.land(pos) and pos not in seen and _on_incoming_side(pos, turn)
+    ]
+    center = _map_center(turn)
+    extra.sort(key=lambda pos: (distance(pos, center), pos.x, pos.y))
+    return inner + tuple(extra)
 
 
 def _wall_order(turn: World) -> tuple[Pos, ...]:

@@ -10,6 +10,7 @@ from tests.helpers import (
     WORKER_1,
     WORKER_2,
     action_of,
+    fill_walls,
     fresh,
     place,
 )
@@ -133,3 +134,21 @@ def test_night_pioneer_with_phase_task_still_fires(make_payload):
     }
     assert str(PIONEER) in controllers
     assert action_of(response, PIONEER) not in {"acceptTask", "move"}
+
+
+def test_night_clear_of_robots_workers_collect(make_payload):
+    """来袭机器人已清空时，夜里就去采矿，不必干等到天亮。"""
+    payload = fresh(make_payload(roundNo=85, phaseTask=""))
+    fill_walls(payload)
+    payload["robot"] = {"roles": []}
+    payload["teamOur"]["goldNum"] = 20
+    place(payload, WORKER_1, 8, 2, backpack=[])
+    place(payload, WORKER_2, 16, 18, backpack=[])
+    place(payload, PIONEER, 18, 18, backpack=["Medicine"])
+    response = decide(payload)
+    _validate(response, payload)
+    assert all(cmd["action"] != "attack" for cmd in response.values())
+    command = response[str(WORKER_1)]
+    assert command["action"] == "collect"
+    target = command["targetPos"][0]
+    assert (target["x"], target["y"]) == (7, 2)
