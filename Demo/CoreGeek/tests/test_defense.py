@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 from agent.brain import (
+    TOWER_LOADOUT,
     _center_facing_east,
     _center_facing_sides,
+    _defense_walls,
     _map_center,
     _on_incoming_side,
     _tower_sites,
@@ -264,6 +266,21 @@ def test_decide_contract_holds_with_wall_priority(make_payload):
             break
     response = decide(payload)
     _validate_decision(response, payload)
+
+
+def test_opening_weapons_cover_far_mid_and_blast():
+    """三座武器按电磁炮、加特林、火箭搭配，远近都有火力。"""
+    assert TOWER_LOADOUT == ("railgun", "gatling", "rocket")
+
+
+def test_outer_wall_ring_starts_after_round_300(make_payload):
+    """第 301 回合起才在朝向敌人的方向加外圈墙，此前墙位不变。"""
+    early = World.load(make_payload(roundNo=35))
+    late = World.load(make_payload(roundNo=301))
+    assert _defense_walls(early) == _wall_order(early)
+    extended = _defense_walls(late)
+    assert list(extended[: len(_wall_order(late))]) == list(_wall_order(late))
+    assert len(extended) > len(_wall_order(late))
 
 
 def _validate_decision(response, payload):
