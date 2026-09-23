@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from dataclasses import dataclass, field
@@ -55,6 +56,7 @@ class Memory:
     api_blob: str = ""
     bundle_kind: str = ""
     model_wait: int = 0
+    last_execute: str = ""
     jobs: dict[int, Job] = field(default_factory=dict)
     roles: dict[int, str] = field(default_factory=dict)
 
@@ -132,6 +134,7 @@ def _clear_task_detail(memory: Memory) -> None:
     memory.api_blob = ""
     memory.bundle_kind = ""
     memory.model_wait = 0
+    memory.last_execute = ""
 
 
 def task_prompt(turn: World) -> str:
@@ -172,22 +175,44 @@ def parse_llm_json(text: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def llm_unavailable(turn: World) -> bool:
+    """比赛内嵌模型 503 或调用失败时，本回合改走本地规则，不能空过。"""
+    parts = [turn.llm_resp or ""]
+    for error in turn.errors:
+        parts.append(str(getattr(error, "description", "") or ""))
+    blob = "\n".join(parts)
+    return "503" in blob or "LLM 调用失败" in blob or "响应非200" in blob
+
+
+def should_ask_model(turn: World, execute: str, answer: str) -> bool:
+    """本地已经有命令或答案时不发 prompt，避免 LLM 503 把整回合决策丢掉。"""
+    if execute or answer or llm_unavailable(turn):
+        return False
+    return bool(turn.phase_task)
+
+
 def next_task_command(turn: World, memory: Memory) -> tuple[str, str]:
     raw = turn.last_cmd_result or ""
     _remember_task_path(memory, raw)
     body = _cmd_body(raw)
     failed = _cmd_failed(raw)
     bundle_answer = ""
-    if body and (not failed or "TASK_TEXT" in body or "CHECK_PASS" in body):
+    if body and (
+        not failed
+        or any(marker in body for marker in ("TASK_TEXT", "CHECK_PASS", "ANSWER", "NEED_FIX", "API_JSON"))
+    ):
         bundle_answer, _kind = _absorb_bundle(body, memory)
-    if bundle_answer:
-        memory.pending_answer = bundle_answer
+    token = "" if bundle_answer else _token_in_output(body)
+    if bundle_answer or token:
+        memory.pending_answer = bundle_answer or token
         memory.task_step += 1
         memory.model_wait = 0
-        return "", bundle_answer
-    parsed = parse_llm_json(turn.llm_resp)
+        memory.last_execute = ""
+        return "", memory.pending_answer
+    use_model = not llm_unavailable(turn)
+    parsed = parse_llm_json(turn.llm_resp) if use_model else {}
     execute = str(parsed.get("executeCmd") or "").strip()
-    answer = _accept_model_answer(str(parsed.get("taskAnswer") or "").strip(), memory)
+    answer = _accept_model_answer(str(parsed.get("taskAnswer") or "").strip(), memory) if use_model else ""
     if answer:
         memory.pending_answer = answer
     if execute:
@@ -200,15 +225,18 @@ def next_task_command(turn: World, memory: Memory) -> tuple[str, str]:
     if answer:
         memory.task_step += 1
         memory.model_wait = 0
+        memory.last_execute = execute
         return execute, answer
     if ready:
         memory.pending_answer = ready
         memory.task_step += 1
         memory.model_wait = 0
+        memory.last_execute = ""
         return "", ready
     if execute:
         memory.task_step += 1
         memory.model_wait = 0
+        memory.last_execute = execute
         return execute, ""
     if (
         memory.pending_answer
@@ -219,7 +247,16 @@ def next_task_command(turn: World, memory: Memory) -> tuple[str, str]:
         return "", memory.pending_answer
     if memory.bundle_kind == "fix":
         return _wait_for_fix(memory)
-    if memory.bundle_kind == "pass" and memory.model_wait < 3:
+    if memory.bundle_kind == "pass":
+        # 检查过了却没抽出 token：再跑一次打出 ANSWER。只空等一回合给内嵌模型。
+        if memory.model_wait < 1:
+            command = _oneshot_cmd("")
+            if command == memory.last_execute:
+                command = _spec_patch_cmd(memory)
+            memory.model_wait += 1
+            memory.task_step += 1
+            memory.last_execute = command
+            return command, ""
         memory.model_wait += 1
         memory.task_step += 1
         return "", ""
@@ -227,27 +264,39 @@ def next_task_command(turn: World, memory: Memory) -> tuple[str, str]:
         memory.bundle_kind == "api"
         and memory.api_blob
         and not memory.api_blob.startswith("API_FAIL")
-        and memory.model_wait < 2
+        and memory.model_wait < 1
     ):
         memory.model_wait += 1
         memory.task_step += 1
         return "", ""
     command = _fallback_cmd(turn, memory)
+    if failed and command and command == memory.last_execute:
+        command = _switch_after_fail(turn, memory)
+    memory.last_execute = command
     memory.task_step += 1
     return command, ""
 
 
 def _wait_for_fix(memory: Memory) -> tuple[str, str]:
-    """检查失败的材料已经交给内嵌模型。模型没给补丁时，按 spec 做一次替换。"""
-    if memory.model_wait >= 1:
-        command = _spec_patch_cmd(memory)
-        memory.model_wait += 1
-        memory.bundle_kind = "patched"
-        memory.task_step += 1
-        return command, ""
+    """检查没过就立刻按 spec 打补丁，不再空等内嵌模型一回合。"""
+    command = _spec_patch_cmd(memory)
+    if command == memory.last_execute:
+        command = _oneshot_cmd("")
     memory.model_wait += 1
+    memory.bundle_kind = "patched"
     memory.task_step += 1
-    return "", ""
+    memory.last_execute = command
+    return command, ""
+
+
+def _switch_after_fail(turn: World, memory: Memory) -> str:
+    """同一条沙盒命令 exitCode 非 0 时换一条，不把失败原样再发一遍。"""
+    if memory.task_file and not str(memory.last_execute).startswith("cat "):
+        return f"cat {memory.task_file}"
+    names = _extract_task_files(turn.phase_task)
+    if names and "base64" not in (memory.last_execute or ""):
+        return _oneshot_cmd(names[0])
+    return _spec_patch_cmd(memory)
 
 
 def _fallback_cmd(turn: World, memory: Memory) -> str:
@@ -276,14 +325,12 @@ def _fallback_cmd(turn: World, memory: Memory) -> str:
         return _oneshot_cmd(_ascii_task_name(name))
     if names:
         return _find_task_file_cmd(names[0])
-    return (
-        "python3 -c "
-        + json.dumps(
-            "from pathlib import Path\n"
-            "root=Path('/tmp/selfEvolutionTask')\n"
-            "print('\\n'.join(str(p) for p in list(root.rglob('task_*'))[:40]) "
-            "if root.exists() else 'MISSING')\n"
-        )
+    return _python_cmd(
+        "from pathlib import Path\n"
+        "root=Path('/tmp/selfEvolutionTask')\n"
+        "print('\\n'.join(str(p) for p in list(root.rglob('task_*'))[:40]) "
+        "if root.exists() else 'MISSING')\n",
+        "/tmp/selfEvolutionTask",
     )
 
 
@@ -319,6 +366,18 @@ def _ascii_task_name(name: str) -> str:
     return ""
 
 
+def _python_cmd(script: str, note: str = "") -> str:
+    """单行 base64 执行。shell 不会把 JSON 里的 \\n 当成换行，多行脚本直接 -c 会 exit 1。"""
+    payload = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    comment = f" # {note}" if note else ""
+    return (
+        "python3 -c \"import base64; exec(base64.b64decode('"
+        + payload
+        + "'))\""
+        + comment
+    )
+
+
 def _find_task_file_cmd(name: str) -> str:
     safe = _ascii_task_name(name) or "*.md"
     if re.search(r"[^\x00-\x7f]", safe):
@@ -335,7 +394,7 @@ def _find_task_file_cmd(name: str) -> str:
         "        hits=[str(p) for p in root.rglob(want)][:20]\n"
         "print('\\n'.join(hits) if hits else 'MISSING')\n"
     )
-    return "python3 -c " + json.dumps(script)
+    return _python_cmd(script, f"/tmp/selfEvolutionTask {safe}")
 
 
 def _explore_workspace_cmd(task_dir: str) -> str:
@@ -447,13 +506,41 @@ for item in [p for p in ws.rglob("*") if p.is_file()]:
     print("--- %s" % item)
     print(chunk)
     budget -= len(chunk)
+spec = specs[0].read_text(encoding="utf-8", errors="replace") if specs else ""
+patterns = [
+    r"把\s*[`「\"'](.+?)[`」\"']\s*改(?:为|成)\s*[`「\"'](.+?)[`」\"']",
+    r"将\s*[`「\"'](.+?)[`」\"']\s*(?:改为|修改为|替换为)\s*[`「\"'](.+?)[`」\"']",
+    r"将\s+(\S+)\s+(?:改为|修改为|替换为)\s+(\S+)",
+]
+pairs = []
+for pattern in patterns:
+    pairs.extend(re.findall(pattern, spec))
+suffixes = {".py", ".yml", ".yaml", ".json", ".toml", ".ini", ".txt", ".sh", ".env", ".conf", ".cfg"}
+files = [p for p in ws.rglob("*") if p.is_file() and p.suffix.lower() in suffixes and p.name != "spec.md"]
+changed = 0
+for src, dst in pairs:
+    src, dst = src.strip(), dst.strip().rstrip("。.")
+    if not src or src == dst:
+        continue
+    for item in files:
+        try:
+            file_text = item.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if src not in file_text:
+            continue
+        item.write_text(file_text.replace(src, dst), encoding="utf-8")
+        changed += 1
+        break
+print("PATCHED", changed)
 print("CHECK_OUT")
 code = 1
+out = ""
 if checks:
     try:
         proc = subprocess.run(["./check"], cwd=str(ws), capture_output=True, text=True, timeout=8)
-        print((proc.stdout or "")[-2500:])
-        print((proc.stderr or "")[-800:])
+        out = ((proc.stdout or "") + "\n" + (proc.stderr or ""))[-3000:]
+        print(out)
         code = proc.returncode
         print("exit", code)
     except Exception as exc:
@@ -461,9 +548,23 @@ if checks:
 else:
     print("NO_CHECK")
 print("CHECK_PASS" if code == 0 else "NEED_FIX")
+if code == 0:
+    token = ""
+    matched = re.search(r"(?i)(?:token|答案)\s*[:=是为]\s*(\S+)", out)
+    if matched:
+        token = matched.group(1).strip().strip("'\"`").rstrip("。")
+    else:
+        lines = [line.strip() for line in out.splitlines() if line.strip()]
+        if lines:
+            token = lines[-1]
+    if token:
+        print("ANSWER")
+        print(token)
+raise SystemExit(0)
 '''
     script = script.replace("__NAME__", repr(safe))
-    return "python3 -c " + json.dumps(script)
+    note = "/tmp/selfEvolutionTask/" + (safe or "*.md")
+    return _python_cmd(script, note)
 
 
 def _spec_patch_cmd(memory: Memory) -> str:
@@ -505,10 +606,22 @@ print("PATCHED", changed)
 if checks:
     try:
         proc = subprocess.run(["./check"], cwd=str(ws), capture_output=True, text=True, timeout=8)
-        print((proc.stdout or "")[-2000:])
-        print((proc.stderr or "")[-500:])
+        out = ((proc.stdout or "") + "\n" + (proc.stderr or ""))[-3000:]
+        print(out)
         print("exit", proc.returncode)
         print("CHECK_PASS" if proc.returncode == 0 else "NEED_FIX")
+        if proc.returncode == 0:
+            token = ""
+            matched = re.search(r"(?i)(?:token|答案)\s*[:=是为]\s*(\S+)", out)
+            if matched:
+                token = matched.group(1).strip().strip("'\"`").rstrip("。")
+            else:
+                lines = [line.strip() for line in out.splitlines() if line.strip()]
+                if lines:
+                    token = lines[-1]
+            if token:
+                print("ANSWER")
+                print(token)
     except Exception as exc:
         print("CHECK_FAIL", type(exc).__name__)
         print("NEED_FIX")
@@ -516,12 +629,12 @@ else:
     print("NEED_FIX")
 '''
     script = script.replace("__ROOT__", repr(root))
-    return "python3 -c " + json.dumps(script)
+    return _python_cmd(script, f"{root} spec.md ./check")
 
 
 _BUNDLE_MARKERS = (
     "TASK_FILE", "TASK_TEXT", "API_JSON", "SPEC", "SOURCE", "FILES",
-    "CHECK_OUT", "NEED_FIX", "CHECK_PASS",
+    "CHECK_OUT", "NEED_FIX", "CHECK_PASS", "ANSWER",
 )
 
 
@@ -541,11 +654,17 @@ def _section(body: str, name: str) -> str:
 
 def _absorb_bundle(body: str, memory: Memory) -> tuple[str, str]:
     text = body or ""
-    if not any(marker in text for marker in ("TASK_TEXT", "CHECK_PASS", "NEED_FIX", "API_JSON")):
+    if not any(marker in text for marker in ("TASK_TEXT", "CHECK_PASS", "NEED_FIX", "API_JSON", "ANSWER")):
         return "", ""
     task = _section(text, "TASK_TEXT")
     if task:
         memory.task_body = task
+    answer_line = _section(text, "ANSWER")
+    if answer_line:
+        line = answer_line.splitlines()[0].strip()
+        if line and _looks_like_answer(line):
+            memory.bundle_kind = "pass"
+            return line, "pass"
     if "API_JSON" in text:
         memory.api_fetched = True
         memory.bundle_kind = "api"
@@ -669,7 +788,31 @@ def _api_cmd(url: str) -> str:
         "except Exception as exc:\n"
         "    print('API_FAIL', type(exc).__name__)\n"
     )
-    return "python3 -c " + json.dumps(script)
+    return _python_cmd(script, url)
+
+
+def _check_token(text: str) -> str:
+    """./check 通过后，从检查输出里取 token，不拿题面里的「答案是」充数。"""
+    out = _section(text or "", "CHECK_OUT") or (text or "")
+    matched = re.search(r"(?i)(?:token|答案)\s*[:=是为]\s*(\S+)", out)
+    if not matched:
+        return ""
+    token = matched.group(1).strip().strip("'\"`").rstrip("。")
+    if token and _looks_like_answer(token):
+        return token
+    return ""
+
+
+def _token_in_output(text: str) -> str:
+    """只认脚本打出的 ANSWER 行，或检查已经通过后的 token。题面里的「答案是」不能提前交。"""
+    marked = _section(text or "", "ANSWER")
+    if marked:
+        line = marked.splitlines()[0].strip()
+        if line and _looks_like_answer(line):
+            return line
+    if "CHECK_PASS" in (text or "") and "NEED_FIX" not in (text or ""):
+        return _check_token(text or "") or _explicit_answer(text or "")
+    return ""
 
 
 def _ready_answer(body: str, memory: Memory) -> str:
